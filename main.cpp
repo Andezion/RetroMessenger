@@ -1,4 +1,5 @@
 #include <wx/wx.h>
+#include <wx/listbox.h>
 
 class MyApp : public wxApp
 {
@@ -10,66 +11,79 @@ class MyFrame : public wxFrame
 {
 public:
     MyFrame(const wxString& title);
-    void OnQuit(wxCommandEvent& event);
-    void OnAbout(wxCommandEvent& event);
-    void OnSize(wxSizeEvent& event);
-    void OnButtonOK(wxCommandEvent& event);
+
 private:
-    DECLARE_EVENT_TABLE()
+    wxListBox* contactList;
+    wxTextCtrl* chatDisplay;
+    wxTextCtrl* messageInput;
+    wxButton* sendButton;
+
+    void OnSend(wxCommandEvent& event);
+
+    wxDECLARE_EVENT_TABLE();
 };
 
-DECLARE_APP(MyApp)
-IMPLEMENT_APP(MyApp)
+enum
+{
+    ID_Send = wxID_HIGHEST + 1
+};
+
+wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
+    EVT_BUTTON(ID_Send, MyFrame::OnSend)
+wxEND_EVENT_TABLE()
+
+wxIMPLEMENT_APP(MyApp);
 
 bool MyApp::OnInit()
 {
-    MyFrame *frame = new MyFrame(wxT("Minimal wxWidgets App"));
+    MyFrame* frame = new MyFrame("Messenger");
     frame->Show(true);
-
     return true;
 }
 
-BEGIN_EVENT_TABLE(MyFrame, wxFrame)
-    EVT_MENU(wxID_ABOUT, MyFrame::OnAbout)
-    EVT_MENU(wxID_EXIT, MyFrame::OnQuit)
-    EVT_SIZE ( MyFrame::OnSize)
-    EVT_BUTTON (wxID_OK, MyFrame::OnButtonOK)
-END_EVENT_TABLE()
-
-void MyFrame::OnAbout(wxCommandEvent& event)
-{
-    wxString msg;
-    msg.Printf(wxT("Hello and welcome to %s"),
-    wxVERSION_STRING);
-    wxMessageBox(msg, wxT("About Minimal"),
-    wxOK | wxICON_INFORMATION, this);
-}
-
-void MyFrame::OnButtonOK(wxCommandEvent &event)
-{
-    auto *button = new wxButton(this, wxID_OK, wxT("OK"),
-                    wxPoint(200, 200));
-}
-
-void MyFrame::OnQuit(wxCommandEvent& event)
-{
-    Close();
-}
-
 MyFrame::MyFrame(const wxString& title)
-: wxFrame(NULL, wxID_ANY, title)
+    : wxFrame(nullptr, wxID_ANY, title, wxDefaultPosition, wxSize(600, 400))
 {
-    wxMenu *fileMenu = new wxMenu;
+    auto* mainSizer = new wxBoxSizer(wxHORIZONTAL);
 
-    wxMenu *helpMenu = new wxMenu;
-    helpMenu->Append(wxID_ABOUT, wxT("&About...\tF1"),
-    wxT("Show about dialog"));
-    fileMenu->Append(wxID_EXIT, wxT("E&xit\tAlt-X"),
-    wxT("Quit this program"));
-    wxMenuBar *menuBar = new wxMenuBar();
-    menuBar->Append(fileMenu, wxT("&File"));
-    menuBar->Append(helpMenu, wxT("&Help"));
-    SetMenuBar(menuBar);
-    CreateStatusBar(2);
-    SetStatusText(wxT("Welcome to wxWidgets!"));
+    contactList = new wxListBox(this, wxID_ANY);
+    contactList->Append("User1");
+    contactList->Append("User2");
+    contactList->Append("User3");
+
+    mainSizer->Add(contactList, 1, wxEXPAND | wxALL, 5);
+
+    wxBoxSizer* chatSizer = new wxBoxSizer(wxVERTICAL);
+
+    chatDisplay = new wxTextCtrl(this, wxID_ANY, "",
+                                 wxDefaultPosition, wxDefaultSize,
+                                 wxTE_MULTILINE | wxTE_READONLY);
+    chatSizer->Add(chatDisplay, 1, wxEXPAND | wxALL, 5);
+
+    wxBoxSizer* inputSizer = new wxBoxSizer(wxHORIZONTAL);
+
+    messageInput = new wxTextCtrl(this, wxID_ANY, "",
+                                  wxDefaultPosition, wxDefaultSize,
+                                  wxTE_PROCESS_ENTER);
+    inputSizer->Add(messageInput, 1, wxEXPAND | wxALL, 5);
+
+    sendButton = new wxButton(this, ID_Send, "Send");
+    inputSizer->Add(sendButton, 0, wxALL, 5);
+
+    chatSizer->Add(inputSizer, 0, wxEXPAND);
+
+    mainSizer->Add(chatSizer, 3, wxEXPAND);
+
+    SetSizer(mainSizer);
+    Centre();
+}
+
+void MyFrame::OnSend(wxCommandEvent& event)
+{
+    wxString message = messageInput->GetValue();
+    if (!message.IsEmpty())
+    {
+        chatDisplay->AppendText("You: " + message + "\n");
+        messageInput->Clear();
+    }
 }
