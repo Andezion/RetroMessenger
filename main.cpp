@@ -1,5 +1,41 @@
 #include <wx/wx.h>
 #include <wx/listbox.h>
+#include <boost/array.hpp>
+#include <boost/asio.hpp>
+
+using boost::asio::ip::tcp;
+
+class EchoClient
+{
+    boost::asio::io_context io;
+    tcp::socket socket{io};
+public:
+    void connect(const std::string & host, const std::string & port)
+    {
+        tcp::resolver resolver(io);
+        auto endpoints = resolver.resolve(host, port);
+        boost::asio::connect(socket, endpoints);
+    }
+
+    void send(const std::string &message)
+    {
+        boost::asio::write(socket, boost::asio::buffer(message));
+    }
+
+    std::string receive()
+    {
+        boost::array<char, 128> buf;
+        boost::system::error_code error;
+
+        size_t len = socket.read_some(boost::asio::buffer(buf), error);
+        return std::string(buf.data(), len);
+    }
+
+    void run()
+    {
+        io.run();
+    }
+};
 
 class MyApp : public wxApp
 {
@@ -17,6 +53,7 @@ private:
     wxTextCtrl* chatDisplay;
     wxTextCtrl* messageInput;
     wxButton* sendButton;
+    EchoClient client;
 
     void OnSend(wxCommandEvent& event);
 
@@ -55,7 +92,7 @@ MyFrame::MyFrame(const wxString& title)
 
     wxBoxSizer* chatSizer = new wxBoxSizer(wxVERTICAL);
 
-    chatDisplay = new wxTextCtrl(this, wxID_ANY, "",
+    chatDisplay = new wxTextCtrl(this, wxID_ANY, title,
                                  wxDefaultPosition, wxDefaultSize,
                                  wxTE_MULTILINE | wxTE_READONLY);
     chatSizer->Add(chatDisplay, 1, wxEXPAND | wxALL, 5);
@@ -83,7 +120,10 @@ void MyFrame::OnSend(wxCommandEvent& event)
     wxString message = messageInput->GetValue();
     if (!message.IsEmpty())
     {
+        client.send(std::string(message.mb_str()));
+        wxString reply = wxString::FromUTF8(client.receive());
         chatDisplay->AppendText("You: " + message + "\n");
         messageInput->Clear();
     }
 }
+
