@@ -30,7 +30,6 @@ public:
         {
             event_handler = handler;
             tcp::resolver resolver(io);
-
             const auto endpoints = resolver.resolve(host, port);
             boost::asio::connect(socket, endpoints);
 
@@ -118,11 +117,11 @@ private:
     }
 };
 
-class MyFrame final : public wxFrame
+class MyFrame : public wxFrame
 {
 public:
-    explicit MyFrame(const wxString& title);
-    ~MyFrame() override;
+    MyFrame(const wxString& title);
+    ~MyFrame();
 
 private:
     wxListBox* contactList;
@@ -157,10 +156,10 @@ wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_CLOSE(MyFrame::OnClose)
 wxEND_EVENT_TABLE()
 
-class MyApp final : public wxApp
+class MyApp : public wxApp
 {
 public:
-    bool OnInit() override;
+    virtual bool OnInit();
 };
 
 wxIMPLEMENT_APP(MyApp);
@@ -177,8 +176,8 @@ MyFrame::MyFrame(const wxString& title)
       connected(false)
 {
     auto* mainSizer = new wxBoxSizer(wxVERTICAL);
-    auto* connectionSizer = new wxBoxSizer(wxHORIZONTAL);
 
+    auto* connectionSizer = new wxBoxSizer(wxHORIZONTAL);
     connectionSizer->Add(new wxStaticText(this, wxID_ANY, "Host:"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
     hostInput = new wxTextCtrl(this, wxID_ANY, "127.0.0.1", wxDefaultPosition, wxSize(100, -1));
     connectionSizer->Add(hostInput, 0, wxALL, 5);
@@ -196,6 +195,7 @@ MyFrame::MyFrame(const wxString& title)
 
     contactList = new wxListBox(this, wxID_ANY);
     contactList->Append("All users");
+
     contentSizer->Add(contactList, 1, wxEXPAND | wxALL, 5);
 
     auto* chatSizer = new wxBoxSizer(wxVERTICAL);
@@ -224,7 +224,7 @@ MyFrame::MyFrame(const wxString& title)
     SetSizer(mainSizer);
     Centre();
 
-    messageInput->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent& e) {
+    messageInput->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent& e){
         if (connected)
         {
             wxCommandEvent dummy;
@@ -253,10 +253,12 @@ void MyFrame::OnConnect(wxCommandEvent& event)
         {
             connected = true;
             connectButton->SetLabel("Disconnect");
+
             messageInput->Enable(true);
             sendButton->Enable(true);
             hostInput->Enable(false);
             portInput->Enable(false);
+
             chatDisplay->AppendText("=== Connected to server ===\n");
         }
         else
@@ -271,10 +273,12 @@ void MyFrame::OnConnect(wxCommandEvent& event)
         client.reset();
         connected = false;
         connectButton->SetLabel("Connect");
+
         messageInput->Enable(false);
         sendButton->Enable(false);
         hostInput->Enable(true);
         portInput->Enable(true);
+
         chatDisplay->AppendText("=== Disconnected ===\n");
     }
 }
@@ -284,6 +288,7 @@ void MyFrame::OnSend(wxCommandEvent& event)
     if (const wxString message = messageInput->GetValue(); !message.IsEmpty() && connected && client)
     {
         const auto msg = std::string(message.mb_str());
+
         client->send(msg);
 
         chatDisplay->AppendText("You: " + message + "\n");
