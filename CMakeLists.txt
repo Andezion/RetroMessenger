@@ -4,16 +4,13 @@ project(Messenger CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# wxWidgets
 find_package(wxWidgets REQUIRED COMPONENTS core base net)
 include(${wxWidgets_USE_FILE})
 
-# Boost.Asio — header-only, но нужны потоки
 find_package(Threads REQUIRED)
 
-# === Клиент ===
 add_executable(Messenger
-        main.cpp        # твой GUI (wxWidgets + EchoClient)
+        main.cpp
 )
 
 target_link_libraries(Messenger
@@ -21,9 +18,8 @@ target_link_libraries(Messenger
         Threads::Threads
 )
 
-# === Сервер ===
 add_executable(EchoServer
-        server.cpp      # твой простой boost::asio TCP echo сервер
+        server.cpp
 )
 
 target_link_libraries(EchoServer

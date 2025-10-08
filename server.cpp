@@ -1,21 +1,175 @@
-#include <boost/array.hpp>
 #include <boost/asio.hpp>
+#include <iostream>
+#include <memory>
+#include <set>
+#include <mutex>
+#include <deque>
+
 using boost::asio::ip::tcp;
 
-int main() {
-    boost::asio::io_context io;
-    tcp::acceptor acceptor(io, tcp::endpoint(tcp::v4(), 12345));
+class ChatSession;
 
-    for (;;) {
-        tcp::socket socket(io);
-        acceptor.accept(socket);
+class ChatRoom
+{
+public:
+    void join(const std::shared_ptr<ChatSession>& session)
+    {
+        std::lock_guard lock(mutex_);
+        sessions_.insert(session);
+        std::cout << "Client joined. Total: " << sessions_.size() << std::endl;
+    }
 
-        for (;;) {
-            boost::array<char, 128> buf;
-            boost::system::error_code error;
-            size_t len = socket.read_some(boost::asio::buffer(buf), error);
-            if (error == boost::asio::error::eof) break;
-            boost::asio::write(socket, boost::asio::buffer(buf, len));
+    void leave(const std::shared_ptr<ChatSession>& session)
+    {
+        std::lock_guard lock(mutex_);
+        sessions_.erase(session);
+        std::cout << "Client left. Total: " << sessions_.size() << std::endl;
+    }
+
+    void broadcast(const std::string& message, const std::shared_ptr<ChatSession>& sender)
+    {
+        std::lock_guard lock(mutex_);
+        for (auto& session : sessions_)
+        {
+            if (session != sender)
+            {
+                session->deliver(message);
+            }
         }
     }
+
+private:
+    std::set<std::shared_ptr<ChatSession>> sessions_;
+    std::mutex mutex_;
+};
+
+class ChatSession : public std::enable_shared_from_this<ChatSession>
+{
+public:
+    ChatSession(tcp::socket socket, ChatRoom& room)
+        : socket_(std::move(socket)), room_(room) {}
+
+    void start()
+    {
+        room_.join(shared_from_this());
+        read_message();
+    }
+
+    void deliver(const std::string& message)
+    {
+        const bool write_in_progress = !write_msgs_.empty();
+        write_msgs_.push_back(message);
+        if (!write_in_progress)
+        {
+            write_message();
+        }
+    }
+
+private:
+    void read_message()
+    {
+        auto self(shared_from_this());
+        boost::asio::async_read_until(socket_, buffer_, '\n',
+            [this](const boost::system::error_code &ec, std::size_t length) {
+                if (!ec)
+                {
+                    std::istream is(&buffer_);
+                    std::string message;
+                    std::getline(is, message);
+
+                    std::cout << "Received: " << message << std::endl;
+
+                    room_.broadcast(message + "\n", shared_from_this());
+
+                    deliver("Echo: " + message + "\n");
+
+                    read_message();
+                }
+                else
+                {
+                    room_.leave(shared_from_this());
+                }
+            });
+    }
+
+    void write_message()
+    {
+        auto self(shared_from_this());
+        boost::asio::async_write(socket_,
+            boost::asio::buffer(write_msgs_.front()),
+            [this](const boost::system::error_code &ec, std::size_t) {
+                if (!ec)
+                {
+                    write_msgs_.pop_front();
+                    if (!write_msgs_.empty())
+                    {
+                        write_message();
+                    }
+                }
+                else
+                {
+                    room_.leave(shared_from_this());
+                }
+            });
+    }
+
+    tcp::socket socket_;
+    ChatRoom& room_;
+    boost::asio::streambuf buffer_;
+    std::deque<std::string> write_msgs_;
+};
+
+class ChatServer
+{
+public:
+    ChatServer(boost::asio::io_context& io, const short port)
+        : acceptor_(io, tcp::endpoint(tcp::v4(), port))
+    {
+        accept();
+    }
+
+private:
+    void accept()
+    {
+        acceptor_.async_accept(
+            [this](const boost::system::error_code &ec, tcp::socket socket) {
+                if (!ec)
+                {
+                    std::cout << "New connection from: "
+                              << socket.remote_endpoint().address().to_string()
+                              << std::endl;
+                    std::make_shared<ChatSession>(std::move(socket), room_)->start();
+                }
+                accept();
+            });
+    }
+
+    tcp::acceptor acceptor_;
+    ChatRoom room_;
+};
+
+int main(const int argc, char* argv[])
+{
+    try
+    {
+        int port = 12345;
+        if (argc > 1)
+        {
+            port = std::atoi(argv[1]);
+        }
+
+        boost::asio::io_context io;
+        ChatServer server(io, port);
+
+        std::cout << "Chat server started on port " << port << std::endl;
+        std::cout << "Waiting for connections..." << std::endl;
+
+        io.run();
+    }
+    catch (std::exception& e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
+    return 0;
 }
