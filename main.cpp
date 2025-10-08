@@ -20,8 +20,7 @@ class EchoClient
 public:
     EchoClient() : socket(io), event_handler(nullptr), running(false) {}
 
-    ~EchoClient()
-    {
+    ~EchoClient() {
         disconnect();
     }
 
@@ -31,11 +30,11 @@ public:
         {
             event_handler = handler;
             tcp::resolver resolver(io);
+
             const auto endpoints = resolver.resolve(host, port);
             boost::asio::connect(socket, endpoints);
 
             running = true;
-
             io_thread = std::thread([this]
             {
                 this->read_loop();
@@ -119,7 +118,7 @@ private:
     }
 };
 
-class MyFrame : public wxFrame
+class MyFrame final : public wxFrame
 {
 public:
     explicit MyFrame(const wxString& title);
@@ -137,10 +136,10 @@ private:
     std::unique_ptr<EchoClient> client;
     bool connected;
 
-    void OnSend(wxCommandEvent& event) const;
+    void OnSend(wxCommandEvent& event);
     void OnConnect(wxCommandEvent& event);
-    void OnMessageReceived(const wxCommandEvent& event) const;
-    void OnClose(wxCloseEvent& event) const;
+    void OnMessageReceived(wxCommandEvent& event);
+    void OnClose(wxCloseEvent& event);
 
     wxDECLARE_EVENT_TABLE();
 };
@@ -178,8 +177,8 @@ MyFrame::MyFrame(const wxString& title)
       connected(false)
 {
     auto* mainSizer = new wxBoxSizer(wxVERTICAL);
-
     auto* connectionSizer = new wxBoxSizer(wxHORIZONTAL);
+
     connectionSizer->Add(new wxStaticText(this, wxID_ANY, "Host:"), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
     hostInput = new wxTextCtrl(this, wxID_ANY, "127.0.0.1", wxDefaultPosition, wxSize(100, -1));
     connectionSizer->Add(hostInput, 0, wxALL, 5);
@@ -225,9 +224,9 @@ MyFrame::MyFrame(const wxString& title)
     SetSizer(mainSizer);
     Centre();
 
-    messageInput->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent& e)
-    {
-        if (connected) {
+    messageInput->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent& e) {
+        if (connected)
+        {
             wxCommandEvent dummy;
             OnSend(dummy);
         }
@@ -236,14 +235,16 @@ MyFrame::MyFrame(const wxString& title)
 
 MyFrame::~MyFrame()
 {
-    if (client) {
+    if (client)
+    {
         client->disconnect();
     }
 }
 
 void MyFrame::OnConnect(wxCommandEvent& event)
 {
-    if (!connected) {
+    if (!connected)
+    {
         const auto host = std::string(hostInput->GetValue().mb_str());
         const auto port = std::string(portInput->GetValue().mb_str());
 
@@ -278,24 +279,25 @@ void MyFrame::OnConnect(wxCommandEvent& event)
     }
 }
 
-void MyFrame::OnSend(wxCommandEvent& event) const
+void MyFrame::OnSend(wxCommandEvent& event)
 {
     if (const wxString message = messageInput->GetValue(); !message.IsEmpty() && connected && client)
     {
         const auto msg = std::string(message.mb_str());
         client->send(msg);
+
         chatDisplay->AppendText("You: " + message + "\n");
         messageInput->Clear();
     }
 }
 
-void MyFrame::OnMessageReceived(const wxCommandEvent& event) const
+void MyFrame::OnMessageReceived(wxCommandEvent& event)
 {
     const wxString message = event.GetString();
     chatDisplay->AppendText("Server: " + message + "\n");
 }
 
-void MyFrame::OnClose(wxCloseEvent& event) const
+void MyFrame::OnClose(wxCloseEvent& event)
 {
     if (client)
     {

@@ -26,17 +26,7 @@ public:
         std::cout << "Client left. Total: " << sessions_.size() << std::endl;
     }
 
-    void broadcast(const std::string& message, const std::shared_ptr<ChatSession>& sender)
-    {
-        std::lock_guard lock(mutex_);
-        for (auto& session : sessions_)
-        {
-            if (session != sender)
-            {
-                session->deliver(message);
-            }
-        }
-    }
+    void broadcast(const std::string& message, const std::shared_ptr<ChatSession> &sender);
 
 private:
     std::set<std::shared_ptr<ChatSession>> sessions_;
@@ -59,6 +49,7 @@ public:
     {
         const bool write_in_progress = !write_msgs_.empty();
         write_msgs_.push_back(message);
+
         if (!write_in_progress)
         {
             write_message();
@@ -70,7 +61,7 @@ private:
     {
         auto self(shared_from_this());
         boost::asio::async_read_until(socket_, buffer_, '\n',
-            [this](const boost::system::error_code &ec, std::size_t length) {
+            [this](const boost::system::error_code &ec, std::size_t){
                 if (!ec)
                 {
                     std::istream is(&buffer_);
@@ -118,6 +109,18 @@ private:
     boost::asio::streambuf buffer_;
     std::deque<std::string> write_msgs_;
 };
+
+void ChatRoom::broadcast(const std::string& message, const std::shared_ptr<ChatSession> &sender)
+{
+    std::lock_guard lock(mutex_);
+    for (auto& session : sessions_)
+    {
+        if (session != sender)
+        {
+            session->deliver(message);
+        }
+    }
+}
 
 class ChatServer
 {
