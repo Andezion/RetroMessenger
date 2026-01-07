@@ -15,10 +15,10 @@ class EchoClient
     tcp::socket socket;
     std::thread io_thread;
     wxEvtHandler* event_handler;
-    bool running;
+    boost::asio::streambuf buffer;
 
 public:
-    EchoClient() : socket(io), event_handler(nullptr), running(false) {}
+    EchoClient() : socket(io), event_handler(nullptr) {}
 
     ~EchoClient() {
         disconnect();
@@ -33,10 +33,11 @@ public:
             const auto endpoints = resolver.resolve(host, port);
             boost::asio::connect(socket, endpoints);
 
-            running = true;
+            start_read();
+
             io_thread = std::thread([this]
             {
-                this->read_loop();
+                this->io.run();
             });
 
             return true;
@@ -53,7 +54,14 @@ public:
         try
         {
             std::string msg = message + "\n";
-            boost::asio::write(socket, boost::asio::buffer(msg));
+            boost::asio::async_write(socket, boost::asio::buffer(msg),
+                [](const boost::system::error_code& ec, std::size_t)
+                {
+                    if (ec)
+                    {
+                        wxLogError("Send error: %s", ec.message().c_str());
+                    }
+                });
         }
         catch (const std::exception& e)
         {
@@ -63,11 +71,14 @@ public:
 
     void disconnect()
     {
-        running = false;
-        if (socket.is_open())
+        boost::asio::post(io, [this]()
         {
-            socket.close();
-        }
+            if (socket.is_open())
+            {
+                socket.close();
+            }
+        });
+        
         if (io_thread.joinable())
         {
             io_thread.join();
@@ -75,45 +86,31 @@ public:
     }
 
 private:
-    void read_loop()
+    void start_read()
     {
-        try
-        {
-            boost::asio::streambuf buffer;
-            while (running && socket.is_open())
+        boost::asio::async_read_until(socket, buffer, '\n',
+            [this](const boost::system::error_code& error, std::size_t)
             {
-                boost::system::error_code error;
-
-                boost::asio::read_until(socket, buffer, '\n', error);
-
-                if (error == boost::asio::error::eof)
+                if (!error)
                 {
-                    break;
-                }
-                if (error)
-                {
-                    throw boost::system::system_error(error);
-                }
+                    std::istream is(&buffer);
+                    std::string message;
+                    std::getline(is, message);
 
-                std::istream is(&buffer);
-                std::string message;
-                std::getline(is, message);
+                    if (event_handler)
+                    {
+                        wxCommandEvent event(wxEVT_MESSAGE_RECEIVED);
+                        event.SetString(wxString::FromUTF8(message));
+                        wxQueueEvent(event_handler, event.Clone());
+                    }
 
-                if (event_handler)
-                {
-                    wxCommandEvent event(wxEVT_MESSAGE_RECEIVED);
-                    event.SetString(wxString::FromUTF8(message));
-                    wxQueueEvent(event_handler, event.Clone());
+                    start_read();
                 }
-            }
-        }
-        catch (const std::exception& e)
-        {
-            if (running)
-            {
-                wxLogError("Read error: %s", e.what());
-            }
-        }
+                else if (error != boost::asio::error::operation_aborted)
+                {
+                    wxLogError("Read error: %s", error.message().c_str());
+                }
+            });
     }
 };
 
