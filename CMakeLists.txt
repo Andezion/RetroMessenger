@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(wxWidgets REQUIRED COMPONENTS core base net)
 include(${wxWidgets_USE_FILE})
 
+find_package(Boost REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
 
 add_executable(Messenger
@@ -15,6 +16,7 @@ add_executable(Messenger
 
 target_link_libraries(Messenger
         ${wxWidgets_LIBRARIES}
+        Boost::system
         Threads::Threads
 )
 
@@ -23,5 +25,6 @@ add_executable(EchoServer
 )
 
 target_link_libraries(EchoServer
+        Boost::system
         Threads::Threads
 )
