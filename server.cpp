@@ -61,7 +61,7 @@ private:
     {
         auto self(shared_from_this());
         boost::asio::async_read_until(socket_, buffer_, '\n',
-            [this](const boost::system::error_code &ec, std::size_t){
+            [this, self](const boost::system::error_code &ec, std::size_t){
                 if (!ec)
                 {
                     std::istream is(&buffer_);
@@ -70,9 +70,7 @@ private:
 
                     std::cout << "Received: " << message << std::endl;
 
-                    room_.broadcast(message + "\n", shared_from_this());
-
-                    deliver("Echo: " + message + "\n");
+                    room_.broadcast(message + "\n", nullptr);
 
                     read_message();
                 }
@@ -115,7 +113,7 @@ void ChatRoom::broadcast(const std::string& message, const std::shared_ptr<ChatS
     std::lock_guard lock(mutex_);
     for (auto& session : sessions_)
     {
-        if (session != sender)
+        if (!sender || session != sender)
         {
             session->deliver(message);
         }
