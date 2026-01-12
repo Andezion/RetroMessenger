@@ -1,28 +1,23 @@
-# Build directory
 build/
 cmake-build-*/
 
-# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# Compiled binaries
 Messenger
 EchoServer
 *.o
 *.so
 *.a
 
-# CMake
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake
 
-# OS
 .DS_Store
 Thumbs.db
