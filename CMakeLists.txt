@@ -3,25 +3,19 @@ project(RetroMessenger CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+set(wxWidgets_CONFIG_EXECUTABLE /usr/bin/wx-config)
 
 find_package(wxWidgets REQUIRED COMPONENTS core base)
 include(${wxWidgets_USE_FILE})
 
-find_package(Boost REQUIRED COMPONENTS system)
-find_package(Threads REQUIRED)
+find_package(Boost REQUIRED COMPONENTS filesystem system)
+include_directories(${Boost_INCLUDE_DIRS})
 
 add_executable(RetroMessenger main.cpp)
-
-target_link_libraries(RetroMessenger
-        ${wxWidgets_LIBRARIES}
-        Boost::system
-        Threads::Threads
-)
+target_link_libraries(RetroMessenger ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES})
 
 add_executable(ChatServer server.cpp)
-target_link_libraries(ChatServer
-    Boost::system
-    Threads::Threads
-)
+target_link_libraries(ChatServer ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES})
+
 
