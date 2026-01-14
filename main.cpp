@@ -392,7 +392,7 @@ private:
 class NewChatDialog : public wxDialog {
 public:
     NewChatDialog(wxWindow* parent)
-        : wxDialog(parent, wxID_ANY, "Start New Chat", wxDefaultPosition, wxSize(450, 280)) {
+        : wxDialog(parent, wxID_ANY, "Start New Chat", wxDefaultPosition, wxSize(450, 360)) {
         
         auto* sizer = new wxBoxSizer(wxVERTICAL);
         
