@@ -417,7 +417,7 @@ public:
         sizer->Add(port_sizer, 0, wxEXPAND | wxALL, 10);
         
         auto* button_sizer = new wxBoxSizer(wxHORIZONTAL);
-        auto* invite_btn = new wxButton(this, wxID_OK, "Send Invitation");
+        auto* invite_btn = new wxButton(this, wxID_OK, "Connect");
         auto* cancel_btn = new wxButton(this, wxID_CANCEL, "Cancel");
         button_sizer->Add(invite_btn, 0, wxALL, 5);
         button_sizer->Add(cancel_btn, 0, wxALL, 5);
@@ -541,7 +541,7 @@ MyFrame::MyFrame(const wxString& title)
     profile_sizer->Add(user_id_label_, 0, wxALL, 5);
     top_sizer->Add(profile_sizer, 1, wxEXPAND);
     
-    settings_button_ = new wxButton(top_bar, ID_Settings, "⚙ Settings");
+    settings_button_ = new wxButton(top_bar, ID_Settings, "Settings");
     top_sizer->Add(settings_button_, 0, wxALL, 5);
     
     top_bar->SetSizer(top_sizer);
