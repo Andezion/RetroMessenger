@@ -190,6 +190,10 @@ public:
         }
     }
     
+    void add_session(const std::string& chat_id, std::shared_ptr<P2PSession> session) {
+        sessions_[chat_id] = session;
+    }
+    
     void close_chat(const std::string& chat_id) {
         sessions_.erase(chat_id);
     }
@@ -803,6 +807,8 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 info.active = true;
                 chats_[chat_id] = info;
                 
+                // Register session in P2PManager
+                p2p_manager_->add_session(chat_id, session);
                 session->start();
                 
                 RegenerateUserID();
