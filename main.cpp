@@ -126,6 +126,13 @@ public:
         if (port == 0) {
             listening_port_ = find_available_port();
         }
+        
+        tcp::endpoint endpoint(tcp::v4(), listening_port_);
+        acceptor_.open(endpoint.protocol());
+        acceptor_.set_option(tcp::acceptor::reuse_address(true));
+        acceptor_.bind(endpoint);
+        acceptor_.listen();
+        
         start_accept();
         io_thread_ = std::thread([this]() { io_context_.run(); });
     }
@@ -196,19 +203,13 @@ private:
     }
     
     void start_accept() {
-        tcp::endpoint endpoint(tcp::v4(), listening_port_);
-        acceptor_.open(endpoint.protocol());
-        acceptor_.set_option(tcp::acceptor::reuse_address(true));
-        acceptor_.bind(endpoint);
-        acceptor_.listen();
-        
         auto socket = std::make_shared<tcp::socket>(io_context_);
         acceptor_.async_accept(*socket,
             [this, socket](const boost::system::error_code& ec) {
                 if (!ec) {
                     handle_new_connection(std::move(*socket));
                 }
-                start_accept();
+                do_accept();
             });
     }
     
@@ -235,6 +236,17 @@ private:
         } catch (const std::exception& e) {
             wxLogError("Error handling connection: %s", e.what());
         }
+    }
+    
+    void do_accept() {
+        auto socket = std::make_shared<tcp::socket>(io_context_);
+        acceptor_.async_accept(*socket,
+            [this, socket](const boost::system::error_code& ec) {
+                if (!ec) {
+                    handle_new_connection(std::move(*socket));
+                }
+                do_accept();
+            });
     }
     
     wxEvtHandler* event_handler_;
