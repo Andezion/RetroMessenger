@@ -225,9 +225,11 @@ private:
                 std::string peer_username = invite_msg.substr(7, pos1 - 7);
                 std::string peer_id = invite_msg.substr(pos1 + 1);
                 
+                auto socket_ptr = new tcp::socket(std::move(socket));
+                
                 wxCommandEvent event(wxEVT_INVITATION_RECEIVED);
-                event.SetString(wxString::Format("%s;%s;%ld", peer_username, peer_id, 
-                                                (long)new tcp::socket(std::move(socket))));
+                event.SetString(wxString::Format("%s;%s;%p", peer_username, peer_id, 
+                                                static_cast<void*>(socket_ptr)));
                 wxQueueEvent(event_handler_, event.Clone());
             }
         } catch (const std::exception& e) {
@@ -762,37 +764,53 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
     if (parts.GetCount() >= 3) {
         std::string peer_username = parts[0].ToStdString();
         std::string peer_id = parts[1].ToStdString();
-        tcp::socket* socket_ptr = reinterpret_cast<tcp::socket*>(wxAtoi(parts[2]));
+        
+        // Parse the pointer correctly
+        void* ptr = nullptr;
+        if (std::sscanf(parts[2].c_str(), "%p", &ptr) != 1 || ptr == nullptr) {
+            wxLogError("Invalid socket pointer received");
+            return;
+        }
+        tcp::socket* socket_ptr = static_cast<tcp::socket*>(ptr);
         
         int answer = wxMessageBox(peer_username + " wants to start a chat with you. Accept?",
                                  "Chat Invitation", wxYES_NO | wxICON_QUESTION);
         
-        if (answer == wxYES && socket_ptr) {
-            std::string accept_msg = "ACCEPT:" + username_ + ":" + current_user_id_ + "\n";
-            boost::asio::write(*socket_ptr, boost::asio::buffer(accept_msg));
-            
-            std::string chat_id = generateUniqueID();
-            auto session = std::make_shared<P2PSession>(std::move(*socket_ptr), this, chat_id);
-            
-            ChatInfo info;
-            info.chatID = chat_id;
-            info.peerUsername = peer_username;
-            info.peerID = peer_id;
-            info.active = true;
-            chats_[chat_id] = info;
-            
-            session->start();
-            
-            RegenerateUserID();
-            
-            RefreshChatList();
-            wxMessageBox("Chat started with " + peer_username, "Success", wxOK | wxICON_INFORMATION);
-        } else {
-            std::string reject_msg = "REJECT\n";
-            if (socket_ptr) {
-                boost::asio::write(*socket_ptr, boost::asio::buffer(reject_msg));
+        if (answer == wxYES) {
+            try {
+                std::string accept_msg = "ACCEPT:" + username_ + ":" + current_user_id_ + "\n";
+                boost::asio::write(*socket_ptr, boost::asio::buffer(accept_msg));
+                
+                std::string chat_id = generateUniqueID();
+                auto session = std::make_shared<P2PSession>(std::move(*socket_ptr), this, chat_id);
+                
+                ChatInfo info;
+                info.chatID = chat_id;
+                info.peerUsername = peer_username;
+                info.peerID = peer_id;
+                info.active = true;
+                chats_[chat_id] = info;
+                
+                session->start();
+                
+                RegenerateUserID();
+                
+                RefreshChatList();
+                wxMessageBox("Chat started with " + peer_username, "Success", wxOK | wxICON_INFORMATION);
+                
+                delete socket_ptr; // Clean up the socket object
+            } catch (const std::exception& e) {
+                wxLogError("Error accepting invitation: %s", e.what());
                 delete socket_ptr;
             }
+        } else {
+            try {
+                std::string reject_msg = "REJECT\n";
+                boost::asio::write(*socket_ptr, boost::asio::buffer(reject_msg));
+            } catch (...) {
+                // Ignore errors on reject
+            }
+            delete socket_ptr;
         }
     }
 }
