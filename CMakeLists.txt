@@ -15,8 +15,13 @@ include_directories(${wxWidgets_INCLUDE_DIRS})
 find_package(Boost REQUIRED COMPONENTS filesystem system)
 include_directories(${Boost_INCLUDE_DIRS})
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED libsodium)
+pkg_check_modules(ZSTD REQUIRED libzstd)
+
 add_executable(RetroMessenger main.cpp)
-target_link_libraries(RetroMessenger ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES})
+target_include_directories(RetroMessenger PRIVATE ${SODIUM_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIRS})
+target_link_libraries(RetroMessenger ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES} ${SODIUM_LIBRARIES} ${ZSTD_LIBRARIES})
 
 add_executable(ChatServer server.cpp)
-target_link_libraries(ChatServer ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES})
+target_link_libraries(ChatServer ${Boost_LIBRARIES} pthread)
