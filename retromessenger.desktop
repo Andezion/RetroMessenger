@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RetroMessenger
+Comment=Anonymous encrypted P2P messenger
+Exec=RetroMessenger
+Icon=retromessenger
+Categories=Network;InstantMessaging;
+Terminal=false
