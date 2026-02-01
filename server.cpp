@@ -136,7 +136,9 @@ private:
             [this](const boost::system::error_code &ec, tcp::socket socket) {
                 if (!ec)
                 {
-                    std::cout << "New connection accepted" << std::endl;
+                    std::cout << "New connection from: "
+                              << socket.remote_endpoint().address().to_string()
+                              << std::endl;
                     std::make_shared<ChatSession>(std::move(socket), room_)->start();
                 }
                 accept();
