@@ -14,6 +14,7 @@
 #include <zstd.h>
 #include <vector>
 #include <cstring>
+#include <algorithm>
 
 using boost::asio::ip::tcp;
 
@@ -45,6 +46,309 @@ static std::vector<unsigned char> hex_to_bytes(const std::string& hex) {
 }
 
 static const size_t COMPRESS_THRESHOLD = 64;
+static const size_t TANS_THRESHOLD = 256;
+
+static std::vector<unsigned char> zstd_compress(const unsigned char* data, size_t len) {
+    size_t bound = ZSTD_compressBound(len);
+    std::vector<unsigned char> out(bound);
+    size_t compressed_size = ZSTD_compress(out.data(), bound, data, len, 3);
+    if (ZSTD_isError(compressed_size)) return {};
+    out.resize(compressed_size);
+    return out;
+}
+
+static std::vector<unsigned char> zstd_decompress(const unsigned char* data, size_t len) {
+    unsigned long long decompressed_size = ZSTD_getFrameContentSize(data, len);
+    if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN || decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
+        decompressed_size = len * 10;
+    }
+    std::vector<unsigned char> out(decompressed_size);
+    size_t result = ZSTD_decompress(out.data(), out.size(), data, len);
+    if (ZSTD_isError(result)) return {};
+    out.resize(result);
+    return out;
+}
+
+static const size_t TANS_TABLE_LOG = 11;
+static const size_t TANS_TABLE_SIZE = 1u << TANS_TABLE_LOG; 
+static uint16_t g_tans_norm_freq[256];
+static bool g_tans_tables_built = false;
+
+struct TANSEncodeSymbol {
+    int16_t delta_find_state;
+    uint16_t delta_nb_bits;
+};
+
+struct TANSDecodeEntry {
+    uint8_t symbol;
+    uint8_t nb_bits;
+    uint16_t new_state;
+};
+
+static TANSDecodeEntry g_tans_decode_table[TANS_TABLE_SIZE];
+static std::vector<TANSEncodeSymbol> g_tans_encode_table[256];
+
+static void tans_normalize_freq(const unsigned char* data, size_t len, uint16_t norm[256]) {
+    uint32_t count[256] = {};
+    for (size_t i = 0; i < len; i++) count[data[i]]++;
+
+    int n_symbols = 0;
+    for (int i = 0; i < 256; i++) {
+        if (count[i] > 0) n_symbols++;
+    }
+    if (n_symbols == 0) {
+        std::memset(norm, 0, sizeof(uint16_t) * 256);
+        return;
+    }
+
+    size_t remaining = TANS_TABLE_SIZE;
+    size_t total = len;
+    std::memset(norm, 0, sizeof(uint16_t) * 256);
+
+    for (int i = 0; i < 256; i++) {
+        if (count[i] > 0) {
+            norm[i] = std::max<uint16_t>(1, (uint16_t)((uint64_t)count[i] * TANS_TABLE_SIZE / total));
+        }
+    }
+
+    size_t sum = 0;
+    for (int i = 0; i < 256; i++) sum += norm[i];
+
+    while (sum > TANS_TABLE_SIZE) {
+        int best = -1;
+        for (int i = 0; i < 256; i++) {
+            if (norm[i] > 1 && (best < 0 || norm[i] > norm[best])) best = i;
+        }
+        if (best < 0) break;
+        norm[best]--;
+        sum--;
+    }
+    while (sum < TANS_TABLE_SIZE) {
+        int best = -1;
+        double best_ratio = 1e30;
+        for (int i = 0; i < 256; i++) {
+            if (count[i] > 0) {
+                double ratio = (double)norm[i] / count[i];
+                if (ratio < best_ratio) {
+                    best_ratio = ratio;
+                    best = i;
+                }
+            }
+        }
+        if (best < 0) break;
+        norm[best]++;
+        sum++;
+    }
+}
+
+static void tans_build_tables(const uint16_t norm[256]) {
+    uint8_t symbol_table[TANS_TABLE_SIZE];
+    size_t pos = 0;
+    size_t step = (TANS_TABLE_SIZE >> 1) + (TANS_TABLE_SIZE >> 3) + 3;
+    size_t mask = TANS_TABLE_SIZE - 1;
+
+    uint16_t cumul[257];
+    cumul[0] = 0;
+    for (int i = 0; i < 256; i++) cumul[i + 1] = cumul[i] + norm[i];
+
+    for (int s = 0; s < 256; s++) {
+        for (uint16_t j = 0; j < norm[s]; j++) {
+            symbol_table[pos] = (uint8_t)s;
+            pos = (pos + step) & mask;
+            while (pos >= TANS_TABLE_SIZE) pos = (pos + step) & mask; 
+        }
+    }
+
+    uint16_t next_state[256];
+    for (int s = 0; s < 256; s++) next_state[s] = norm[s]; 
+
+    for (size_t i = 0; i < TANS_TABLE_SIZE; i++) {
+        uint8_t sym = symbol_table[i];
+        uint16_t ns = next_state[sym]++;
+
+        int nb_bits = TANS_TABLE_LOG;
+        uint16_t temp = ns;
+        while (temp >= TANS_TABLE_SIZE) { temp >>= 1; nb_bits--; } 
+        
+        nb_bits = 0;
+        temp = ns;
+        while (temp < TANS_TABLE_SIZE) { temp <<= 1; nb_bits++; }
+
+        g_tans_decode_table[i].symbol = sym;
+        g_tans_decode_table[i].nb_bits = (uint8_t)nb_bits;
+        g_tans_decode_table[i].new_state = (uint16_t)((ns << nb_bits) - TANS_TABLE_SIZE);
+    }
+
+    for (int s = 0; s < 256; s++) {
+        g_tans_encode_table[s].clear();
+        if (norm[s] == 0) continue;
+        g_tans_encode_table[s].resize(norm[s]);
+    }
+
+    uint16_t sym_count[256] = {};
+    for (size_t i = 0; i < TANS_TABLE_SIZE; i++) {
+        uint8_t sym = g_tans_decode_table[i].symbol;
+        uint8_t nb = g_tans_decode_table[i].nb_bits;
+        uint16_t ns = g_tans_decode_table[i].new_state;
+
+        size_t idx = sym_count[sym]++;
+        if (idx < g_tans_encode_table[sym].size()) {
+            g_tans_encode_table[sym][idx].delta_find_state = (int16_t)i;
+            g_tans_encode_table[sym][idx].delta_nb_bits = nb;
+        }
+    }
+
+    g_tans_tables_built = true;
+}
+
+static std::vector<unsigned char> tans_encode(const unsigned char* data, size_t len) {
+    if (len == 0 || len > 65535) return {};
+
+    uint16_t norm[256];
+    tans_normalize_freq(data, len, norm);
+
+    int n_symbols = 0;
+    for (int i = 0; i < 256; i++) {
+        if (norm[i] > 0) n_symbols++;
+    }
+    if (n_symbols <= 1) {
+        return {};
+    }
+
+    tans_build_tables(norm);
+
+    uint32_t state = TANS_TABLE_SIZE;
+
+    std::vector<unsigned char> bits_buf;
+    bits_buf.reserve(len);
+    uint64_t bit_buffer = 0;
+    int bit_count = 0;
+
+    auto flush_bits = [&]() {
+        while (bit_count >= 8) {
+            bit_count -= 8;
+            bits_buf.push_back((unsigned char)((bit_buffer >> bit_count) & 0xFF));
+        }
+    };
+
+    for (size_t i = 0; i < len; i++) {
+        uint8_t sym = data[i];
+        if (norm[sym] == 0) return {}; 
+
+        uint16_t freq = norm[sym];
+
+        int nb_bits = 0;
+        uint32_t s = state;
+        while (s >= (uint32_t)(freq << (TANS_TABLE_LOG + 1))) {
+            bit_buffer = (bit_buffer << 1) | (s & 1);
+            bit_count++;
+            s >>= 1;
+            nb_bits++;
+            flush_bits();
+        }
+
+        if (s < freq) {
+            s = freq;
+        }
+
+        uint16_t sub_idx;
+        if (s >= 2u * freq) {
+            sub_idx = (uint16_t)(s % freq);
+        } else {
+            sub_idx = (uint16_t)(s - freq);
+        }
+        if (sub_idx >= g_tans_encode_table[sym].size()) {
+            sub_idx = sub_idx % (uint16_t)g_tans_encode_table[sym].size();
+        }
+
+        state = TANS_TABLE_SIZE + g_tans_encode_table[sym][sub_idx].delta_find_state;
+    }
+
+    bit_buffer = (bit_buffer << TANS_TABLE_LOG) | (state - TANS_TABLE_SIZE);
+    bit_count += TANS_TABLE_LOG;
+    flush_bits();
+
+    if (bit_count > 0) {
+        bit_buffer <<= (8 - bit_count);
+        bits_buf.push_back((unsigned char)((bit_buffer) & 0xFF));
+    }
+
+    std::vector<unsigned char> result;
+    result.reserve(2 + 512 + bits_buf.size());
+
+    result.push_back((unsigned char)((len >> 8) & 0xFF));
+    result.push_back((unsigned char)(len & 0xFF));
+
+    result.push_back((unsigned char)n_symbols);
+    for (int i = 0; i < 256; i++) {
+        if (norm[i] > 0) {
+            result.push_back((unsigned char)i);
+            result.push_back((unsigned char)((norm[i] >> 8) & 0xFF));
+            result.push_back((unsigned char)(norm[i] & 0xFF));
+        }
+    }
+
+    result.insert(result.end(), bits_buf.begin(), bits_buf.end());
+
+    return result;
+}
+
+static std::vector<unsigned char> tans_decode(const unsigned char* data, size_t len) {
+    if (len < 3) return {};
+
+    size_t orig_len = ((size_t)data[0] << 8) | data[1];
+    size_t offset = 2;
+
+    if (offset >= len) return {};
+    int n_symbols = data[offset++];
+
+    uint16_t norm[256] = {};
+    for (int i = 0; i < n_symbols; i++) {
+        if (offset + 3 > len) return {};
+        uint8_t sym = data[offset++];
+        norm[sym] = ((uint16_t)data[offset] << 8) | data[offset + 1];
+        offset += 2;
+    }
+
+    tans_build_tables(norm);
+
+    const unsigned char* bits_data = data + offset;
+    size_t bits_len = len - offset;
+
+    size_t bit_pos = 0;
+    auto read_bits = [&](int n) -> uint32_t {
+        uint32_t val = 0;
+        for (int i = 0; i < n; i++) {
+            size_t byte_idx = bit_pos / 8;
+            int bit_idx = 7 - (bit_pos % 8);
+            if (byte_idx < bits_len) {
+                val = (val << 1) | ((bits_data[byte_idx] >> bit_idx) & 1);
+            }
+            bit_pos++;
+        }
+        return val;
+    };
+
+    uint32_t state = read_bits(TANS_TABLE_LOG);
+    state += TANS_TABLE_SIZE; 
+
+    std::vector<unsigned char> output;
+    output.reserve(orig_len);
+
+    for (size_t i = 0; i < orig_len; i++) {
+        uint16_t table_idx = (uint16_t)(state - TANS_TABLE_SIZE);
+        if (table_idx >= TANS_TABLE_SIZE) break;
+
+        output.push_back(g_tans_decode_table[table_idx].symbol);
+        uint8_t nb = g_tans_decode_table[table_idx].nb_bits;
+        uint16_t new_state_base = g_tans_decode_table[table_idx].new_state;
+
+        uint32_t bits_read = read_bits(nb);
+        state = TANS_TABLE_SIZE + new_state_base + bits_read;
+    }
+
+    return output;
+}
 
 static std::vector<unsigned char> compress_data(const std::string& input) {
     if (input.size() < COMPRESS_THRESHOLD) {
@@ -53,18 +357,33 @@ static std::vector<unsigned char> compress_data(const std::string& input) {
         std::memcpy(out.data() + 1, input.data(), input.size());
         return out;
     }
-    size_t bound = ZSTD_compressBound(input.size());
-    std::vector<unsigned char> out(1 + bound);
-    out[0] = 0x01; 
-    size_t compressed_size = ZSTD_compress(out.data() + 1, bound,
-                                           input.data(), input.size(), 3);
-    if (ZSTD_isError(compressed_size)) {
-        out.resize(1 + input.size());
+
+    if (input.size() < TANS_THRESHOLD) {
+        auto compressed = tans_encode(
+            reinterpret_cast<const unsigned char*>(input.data()), input.size());
+        if (!compressed.empty() && compressed.size() < input.size()) {
+            std::vector<unsigned char> out(1 + compressed.size());
+            out[0] = 0x02; 
+            std::memcpy(out.data() + 1, compressed.data(), compressed.size());
+            return out;
+        }
+        std::vector<unsigned char> out(1 + input.size());
         out[0] = 0x00;
         std::memcpy(out.data() + 1, input.data(), input.size());
         return out;
     }
-    out.resize(1 + compressed_size);
+
+    auto compressed = zstd_compress(
+        reinterpret_cast<const unsigned char*>(input.data()), input.size());
+    if (!compressed.empty() && compressed.size() < input.size()) {
+        std::vector<unsigned char> out(1 + compressed.size());
+        out[0] = 0x01;
+        std::memcpy(out.data() + 1, compressed.data(), compressed.size());
+        return out;
+    }
+    std::vector<unsigned char> out(1 + input.size());
+    out[0] = 0x00;
+    std::memcpy(out.data() + 1, input.data(), input.size());
     return out;
 }
 
@@ -73,16 +392,17 @@ static std::string decompress_data(const unsigned char* data, size_t len) {
     if (data[0] == 0x00) {
         return std::string(reinterpret_cast<const char*>(data + 1), len - 1);
     }
-    unsigned long long decompressed_size = ZSTD_getFrameContentSize(data + 1, len - 1);
-    if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN || decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
-        decompressed_size = len * 10;
+    if (data[0] == 0x02) {
+        auto decoded = tans_decode(data + 1, len - 1);
+        if (decoded.empty()) return "[tANS decompression error]";
+        return std::string(reinterpret_cast<const char*>(decoded.data()), decoded.size());
     }
-    std::vector<char> out(decompressed_size);
-    size_t result = ZSTD_decompress(out.data(), out.size(), data + 1, len - 1);
-    if (ZSTD_isError(result)) {
-        return "[decompression error]";
+    if (data[0] == 0x01) {
+        auto decoded = zstd_decompress(data + 1, len - 1);
+        if (decoded.empty()) return "[decompression error]";
+        return std::string(reinterpret_cast<const char*>(decoded.data()), decoded.size());
     }
-    return std::string(out.data(), result);
+    return "[unknown compression format]";
 }
 
 static const size_t PAD_BLOCK_SIZE = 256;
@@ -113,62 +433,307 @@ static std::vector<unsigned char> unpad_data(const std::vector<unsigned char>& i
     return input;
 }
 
-static std::vector<unsigned char> encrypt_message(
-    const std::vector<unsigned char>& plaintext,
-    const unsigned char shared_key[crypto_box_BEFORENMBYTES])
+static void kdf_derive_pair(
+    const unsigned char* input_key, size_t input_len,
+    const unsigned char* salt, size_t salt_len,
+    const char* context,
+    unsigned char out_key1[32],
+    unsigned char out_key2[32])
 {
-    std::vector<unsigned char> nonce(crypto_box_NONCEBYTES);
-    randombytes_buf(nonce.data(), crypto_box_NONCEBYTES);
+    crypto_generichash_state state;
 
-    std::vector<unsigned char> ciphertext(plaintext.size() + crypto_box_MACBYTES);
-    crypto_box_easy_afternm(ciphertext.data(), plaintext.data(), plaintext.size(),
-                            nonce.data(), shared_key);
+    crypto_generichash_init(&state, input_key, input_len, 32);
+    if (salt && salt_len > 0)
+        crypto_generichash_update(&state, salt, salt_len);
+    crypto_generichash_update(&state,
+        reinterpret_cast<const unsigned char*>(context), strlen(context));
+    unsigned char tag = 0x01;
+    crypto_generichash_update(&state, &tag, 1);
+    crypto_generichash_final(&state, out_key1, 32);
 
-    std::vector<unsigned char> out(nonce.size() + ciphertext.size());
-    std::memcpy(out.data(), nonce.data(), nonce.size());
-    std::memcpy(out.data() + nonce.size(), ciphertext.data(), ciphertext.size());
-    return out;
+    crypto_generichash_init(&state, input_key, input_len, 32);
+    if (salt && salt_len > 0)
+        crypto_generichash_update(&state, salt, salt_len);
+    crypto_generichash_update(&state,
+        reinterpret_cast<const unsigned char*>(context), strlen(context));
+    tag = 0x02;
+    crypto_generichash_update(&state, &tag, 1);
+    crypto_generichash_final(&state, out_key2, 32);
+
+    sodium_memzero(&state, sizeof(state));
 }
 
-static std::vector<unsigned char> decrypt_message(
-    const unsigned char* data, size_t len,
-    const unsigned char shared_key[crypto_box_BEFORENMBYTES])
+static void chain_advance(
+    const unsigned char chain_key_in[32],
+    unsigned char message_key_out[32],
+    unsigned char chain_key_out[32])
 {
-    if (len < crypto_box_NONCEBYTES + crypto_box_MACBYTES) return {};
+    kdf_derive_pair(chain_key_in, 32, nullptr, 0, "chain",
+                    message_key_out, chain_key_out);
+}
 
-    const unsigned char* nonce = data;
-    const unsigned char* ciphertext = data + crypto_box_NONCEBYTES;
-    size_t ciphertext_len = len - crypto_box_NONCEBYTES;
+static void dh_ratchet_step(
+    const unsigned char root_key_in[32],
+    const unsigned char* dh_output, size_t dh_len,
+    unsigned char root_key_out[32],
+    unsigned char chain_key_out[32])
+{
+    kdf_derive_pair(root_key_in, 32, dh_output, dh_len, "ratchet",
+                    root_key_out, chain_key_out);
+}
 
-    std::vector<unsigned char> plaintext(ciphertext_len - crypto_box_MACBYTES);
-    if (crypto_box_open_easy_afternm(plaintext.data(), ciphertext, ciphertext_len,
-                                      nonce, shared_key) != 0) {
-        return {}; 
+static void compute_message_hash(
+    const unsigned char* prev_hash,
+    const unsigned char* ciphertext, size_t ciphertext_len,
+    uint32_t counter,
+    unsigned char out_hash[32])
+{
+    crypto_generichash_state state;
+    crypto_generichash_init(&state, nullptr, 0, 32);
+    crypto_generichash_update(&state, prev_hash, 32);
+    crypto_generichash_update(&state, ciphertext, ciphertext_len);
+    unsigned char counter_bytes[4] = {
+        (unsigned char)((counter >> 24) & 0xFF),
+        (unsigned char)((counter >> 16) & 0xFF),
+        (unsigned char)((counter >> 8) & 0xFF),
+        (unsigned char)(counter & 0xFF)
+    };
+    crypto_generichash_update(&state, counter_bytes, 4);
+    crypto_generichash_final(&state, out_hash, 32);
+}
+
+struct RatchetState {
+    unsigned char root_key[32];
+    unsigned char send_chain_key[32];
+    unsigned char recv_chain_key[32];
+
+    unsigned char my_eph_pk[crypto_box_PUBLICKEYBYTES];
+    unsigned char my_eph_sk[crypto_box_SECRETKEYBYTES];
+    unsigned char peer_eph_pk[crypto_box_PUBLICKEYBYTES];
+
+    uint32_t send_counter;
+    uint32_t recv_counter;
+
+    unsigned char last_sent_hash[32];
+    unsigned char last_recv_hash[32];
+
+    bool needs_dh_ratchet;
+    bool peer_eph_known; 
+
+    void zero() {
+        sodium_memzero(root_key, sizeof(root_key));
+        sodium_memzero(send_chain_key, sizeof(send_chain_key));
+        sodium_memzero(recv_chain_key, sizeof(recv_chain_key));
+        sodium_memzero(my_eph_sk, sizeof(my_eph_sk));
+        send_counter = 0;
+        recv_counter = 0;
     }
-    return plaintext;
+};
+
+static void init_ratchet(
+    RatchetState& ratchet,
+    const unsigned char initial_shared_key[crypto_box_BEFORENMBYTES],
+    bool is_initiator)
+{
+    unsigned char dummy[32];
+    kdf_derive_pair(initial_shared_key, crypto_box_BEFORENMBYTES,
+                    nullptr, 0, "init", ratchet.root_key, dummy);
+    sodium_memzero(dummy, 32);
+
+    crypto_box_keypair(ratchet.my_eph_pk, ratchet.my_eph_sk);
+
+    std::memset(ratchet.peer_eph_pk, 0, sizeof(ratchet.peer_eph_pk));
+    ratchet.peer_eph_known = false;
+
+    unsigned char ck1[32], ck2[32];
+    kdf_derive_pair(ratchet.root_key, 32, nullptr, 0, "initial_chains", ck1, ck2);
+
+    if (is_initiator) {
+        std::memcpy(ratchet.send_chain_key, ck1, 32);
+        std::memcpy(ratchet.recv_chain_key, ck2, 32);
+    } else {
+        std::memcpy(ratchet.send_chain_key, ck2, 32);
+        std::memcpy(ratchet.recv_chain_key, ck1, 32);
+    }
+
+    sodium_memzero(ck1, 32);
+    sodium_memzero(ck2, 32);
+
+    ratchet.send_counter = 0;
+    ratchet.recv_counter = 0;
+    std::memset(ratchet.last_sent_hash, 0, 32);
+    std::memset(ratchet.last_recv_hash, 0, 32);
+    ratchet.needs_dh_ratchet = is_initiator;
 }
 
-static std::vector<unsigned char> seal_message(
+static const uint8_t MSG_TYPE_DATA = 0x01;
+
+static const size_t RATCHET_HEADER_SIZE = 93;
+
+static std::vector<unsigned char> seal_message_ratchet(
     const std::string& message,
-    const unsigned char shared_key[crypto_box_BEFORENMBYTES])
+    RatchetState& ratchet)
 {
+    if (ratchet.needs_dh_ratchet && ratchet.peer_eph_known) {
+        unsigned char dh_output[crypto_scalarmult_BYTES];
+        if (crypto_scalarmult(dh_output, ratchet.my_eph_sk, ratchet.peer_eph_pk) == 0) {
+            unsigned char new_root[32], new_chain[32];
+            dh_ratchet_step(ratchet.root_key, dh_output, sizeof(dh_output),
+                            new_root, new_chain);
+            std::memcpy(ratchet.root_key, new_root, 32);
+            std::memcpy(ratchet.send_chain_key, new_chain, 32);
+
+            sodium_memzero(dh_output, sizeof(dh_output));
+            sodium_memzero(new_root, 32);
+            sodium_memzero(new_chain, 32);
+        }
+        crypto_box_keypair(ratchet.my_eph_pk, ratchet.my_eph_sk);
+        ratchet.needs_dh_ratchet = false;
+    }
+
+    unsigned char message_key[32];
+    unsigned char new_chain_key[32];
+    chain_advance(ratchet.send_chain_key, message_key, new_chain_key);
+    std::memcpy(ratchet.send_chain_key, new_chain_key, 32);
+    sodium_memzero(new_chain_key, 32);
+
     auto compressed = compress_data(message);
     auto padded = pad_data(compressed);
-    return encrypt_message(padded, shared_key);
+
+    unsigned char nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES]; 
+    randombytes_buf(nonce, sizeof(nonce));
+
+    uint32_t counter = ratchet.send_counter;
+    unsigned char counter_bytes[4] = {
+        (unsigned char)((counter >> 24) & 0xFF),
+        (unsigned char)((counter >> 16) & 0xFF),
+        (unsigned char)((counter >> 8) & 0xFF),
+        (unsigned char)(counter & 0xFF)
+    };
+
+    std::vector<unsigned char> ad;
+    ad.insert(ad.end(), ratchet.my_eph_pk, ratchet.my_eph_pk + 32);
+    ad.insert(ad.end(), ratchet.last_sent_hash, ratchet.last_sent_hash + 32);
+    ad.insert(ad.end(), counter_bytes, counter_bytes + 4);
+
+    std::vector<unsigned char> ciphertext(
+        padded.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    unsigned long long ciphertext_len = 0;
+    crypto_aead_xchacha20poly1305_ietf_encrypt(
+        ciphertext.data(), &ciphertext_len,
+        padded.data(), padded.size(),
+        ad.data(), ad.size(),
+        nullptr, nonce, message_key);
+    ciphertext.resize((size_t)ciphertext_len);
+
+    std::vector<unsigned char> wire;
+    wire.reserve(RATCHET_HEADER_SIZE + ciphertext.size());
+    wire.push_back(MSG_TYPE_DATA);
+    wire.insert(wire.end(), ratchet.my_eph_pk, ratchet.my_eph_pk + 32);
+    wire.insert(wire.end(), ratchet.last_sent_hash, ratchet.last_sent_hash + 32);
+    wire.insert(wire.end(), counter_bytes, counter_bytes + 4);
+    wire.insert(wire.end(), nonce, nonce + 24);
+    wire.insert(wire.end(), ciphertext.begin(), ciphertext.end());
+
+    compute_message_hash(ratchet.last_sent_hash, ciphertext.data(),
+                         ciphertext.size(), counter, ratchet.last_sent_hash);
+
+    ratchet.send_counter++;
+    sodium_memzero(message_key, sizeof(message_key));
+
+    return wire;
 }
 
-static std::string unseal_message(
+static std::string unseal_message_ratchet(
     const unsigned char* data, size_t len,
-    const unsigned char shared_key[crypto_box_BEFORENMBYTES])
+    RatchetState& ratchet)
 {
-    auto decrypted = decrypt_message(data, len, shared_key);
-    if (decrypted.empty()) return "[decryption failed]";
-    auto unpadded = unpad_data(decrypted);
+    if (len < RATCHET_HEADER_SIZE + crypto_aead_xchacha20poly1305_ietf_ABYTES) {
+        return "[invalid message: too short]";
+    }
+
+    size_t offset = 0;
+    uint8_t msg_type = data[offset++];
+    if (msg_type != MSG_TYPE_DATA) {
+        return "[unsupported message type]";
+    }
+
+    const unsigned char* peer_eph_pk = data + offset; offset += 32;
+    const unsigned char* prev_hash   = data + offset; offset += 32;
+
+    uint32_t counter = ((uint32_t)data[offset] << 24) |
+                       ((uint32_t)data[offset+1] << 16) |
+                       ((uint32_t)data[offset+2] << 8) |
+                       (uint32_t)data[offset+3];
+    offset += 4;
+
+    const unsigned char* nonce = data + offset; offset += 24;
+    const unsigned char* ciphertext = data + offset;
+    size_t ciphertext_len = len - offset;
+
+    if (!ratchet.peer_eph_known ||
+        sodium_memcmp(peer_eph_pk, ratchet.peer_eph_pk, 32) != 0) {
+        std::memcpy(ratchet.peer_eph_pk, peer_eph_pk, 32);
+        ratchet.peer_eph_known = true;
+
+        unsigned char dh_output[crypto_scalarmult_BYTES];
+        if (crypto_scalarmult(dh_output, ratchet.my_eph_sk, ratchet.peer_eph_pk) == 0) {
+            unsigned char new_root[32], new_chain[32];
+            dh_ratchet_step(ratchet.root_key, dh_output, sizeof(dh_output),
+                            new_root, new_chain);
+            std::memcpy(ratchet.root_key, new_root, 32);
+            std::memcpy(ratchet.recv_chain_key, new_chain, 32);
+
+            sodium_memzero(dh_output, sizeof(dh_output));
+            sodium_memzero(new_root, 32);
+            sodium_memzero(new_chain, 32);
+        }
+        ratchet.needs_dh_ratchet = true;
+    }
+
+    unsigned char message_key[32];
+    unsigned char new_chain_key[32];
+    chain_advance(ratchet.recv_chain_key, message_key, new_chain_key);
+    std::memcpy(ratchet.recv_chain_key, new_chain_key, 32);
+    sodium_memzero(new_chain_key, 32);
+
+    unsigned char counter_bytes[4] = {
+        (unsigned char)((counter >> 24) & 0xFF),
+        (unsigned char)((counter >> 16) & 0xFF),
+        (unsigned char)((counter >> 8) & 0xFF),
+        (unsigned char)(counter & 0xFF)
+    };
+
+    std::vector<unsigned char> ad;
+    ad.insert(ad.end(), peer_eph_pk, peer_eph_pk + 32);
+    ad.insert(ad.end(), prev_hash, prev_hash + 32);
+    ad.insert(ad.end(), counter_bytes, counter_bytes + 4);
+
+    std::vector<unsigned char> plaintext(
+        ciphertext_len - crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    unsigned long long plaintext_len = 0;
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+            plaintext.data(), &plaintext_len,
+            nullptr,
+            ciphertext, ciphertext_len,
+            ad.data(), ad.size(),
+            nonce, message_key) != 0) {
+        sodium_memzero(message_key, sizeof(message_key));
+        return "[decryption failed]";
+    }
+    plaintext.resize((size_t)plaintext_len);
+
+    compute_message_hash(ratchet.last_recv_hash, ciphertext, ciphertext_len,
+                         counter, ratchet.last_recv_hash);
+    ratchet.recv_counter++;
+    sodium_memzero(message_key, sizeof(message_key));
+
+    auto unpadded = unpad_data(plaintext);
     return decompress_data(unpadded.data(), unpadded.size());
 }
 
 std::string generateUniqueID() {
-    unsigned char buf[16]; 
+    unsigned char buf[16];
     randombytes_buf(buf, sizeof(buf));
     return bytes_to_hex(buf, sizeof(buf));
 }
@@ -178,18 +743,25 @@ std::string truncateID(const std::string& id) {
     return id.substr(0, 6) + ".." + id.substr(id.size() - 6);
 }
 
-enum class ConnectionMode {
-    PEER_TO_PEER,
-    SERVER
-};
-
 struct ChatInfo {
     std::string chatID;
     std::string peerID;
     std::string localAlias;
-    std::vector<std::pair<std::string, std::string>> messageCache; 
-    unsigned char shared_key[crypto_box_BEFORENMBYTES];
+    std::vector<std::pair<std::string, std::string>> messageCache;
+    RatchetState ratchet;
     bool active;
+    bool is_initiator;
+};
+
+struct ReceivedMessageData {
+    std::string chat_id;
+    std::vector<unsigned char> payload;
+};
+
+struct PeerConnectedData {
+    std::string chat_id;
+    std::string peer_id;
+    RatchetState ratchet;
 };
 
 static std::vector<unsigned char> frame_encode(const std::vector<unsigned char>& payload) {
@@ -210,25 +782,20 @@ static std::vector<unsigned char> frame_encode_string(const std::string& s) {
 
 class P2PSession : public std::enable_shared_from_this<P2PSession> {
 public:
-    P2PSession(tcp::socket socket, wxEvtHandler* handler, const std::string& chatID,
-               const unsigned char shared_key[crypto_box_BEFORENMBYTES])
+    P2PSession(tcp::socket socket, wxEvtHandler* handler, const std::string& chatID)
         : socket_(std::move(socket)), event_handler_(handler), chat_id_(chatID)
     {
-        std::memcpy(shared_key_, shared_key, crypto_box_BEFORENMBYTES);
     }
 
     void start() {
         read_frame_header();
     }
 
-    void send_message(const std::string& message) {
-        auto encrypted = seal_message(message, shared_key_);
-        auto frame = frame_encode(encrypted);
-
+    void send_raw(const std::vector<unsigned char>& framed_data) {
         auto self(shared_from_this());
-        boost::asio::post(socket_.get_executor(), [this, self, frame]() {
+        boost::asio::post(socket_.get_executor(), [this, self, framed_data]() {
             bool write_in_progress = !write_queue_.empty();
-            write_queue_.push_back(frame);
+            write_queue_.push_back(framed_data);
             if (!write_in_progress) {
                 do_write();
             }
@@ -248,7 +815,7 @@ private:
                                    (static_cast<uint32_t>(header_buf_[2]) << 8) |
                                    static_cast<uint32_t>(header_buf_[3]);
 
-                    if (len > 10 * 1024 * 1024) { 
+                    if (len > 10 * 1024 * 1024) {
                         notify_disconnect();
                         return;
                     }
@@ -265,15 +832,15 @@ private:
         boost::asio::async_read(socket_, boost::asio::buffer(payload_buf_.data(), len),
             [this, self](const boost::system::error_code& ec, std::size_t) {
                 if (!ec) {
-                    auto message = unseal_message(payload_buf_.data(), payload_buf_.size(), shared_key_);
-
                     if (event_handler_) {
+                        auto* msg_data = new ReceivedMessageData();
+                        msg_data->chat_id = chat_id_;
+                        msg_data->payload.assign(payload_buf_.begin(), payload_buf_.end());
+
                         wxCommandEvent event(wxEVT_MESSAGE_RECEIVED);
-                        event.SetString(wxString::FromUTF8(message));
-                        event.SetClientData(new std::string(chat_id_));
+                        event.SetClientData(msg_data);
                         wxQueueEvent(event_handler_, event.Clone());
                     }
-
                     read_frame_header();
                 } else {
                     notify_disconnect();
@@ -308,7 +875,6 @@ private:
     tcp::socket socket_;
     wxEvtHandler* event_handler_;
     std::string chat_id_;
-    unsigned char shared_key_[crypto_box_BEFORENMBYTES];
     unsigned char header_buf_[4];
     std::vector<unsigned char> payload_buf_;
     std::deque<std::vector<unsigned char>> write_queue_;
@@ -352,7 +918,6 @@ public:
     void send_invitation(const std::string& peer_address, const std::string& peer_port,
                          const std::string& my_id) {
         auto socket = std::make_shared<tcp::socket>(io_context_);
-        auto timer = std::make_shared<boost::asio::steady_timer>(io_context_);
 
         try {
             tcp::resolver resolver(io_context_);
@@ -394,17 +959,22 @@ public:
                 }
 
                 std::string chat_id = generateUniqueID();
-                auto session = std::make_shared<P2PSession>(std::move(*socket), event_handler_,
-                                                             chat_id, shared_key);
+
+                auto* conn_data = new PeerConnectedData();
+                conn_data->chat_id = chat_id;
+                conn_data->peer_id = peer_id;
+                init_ratchet(conn_data->ratchet, shared_key, true);
+                sodium_memzero(shared_key, sizeof(shared_key));
+
+                auto session = std::make_shared<P2PSession>(std::move(*socket), event_handler_, chat_id);
                 {
                     std::lock_guard<std::mutex> lock(sessions_mutex_);
                     sessions_[chat_id] = session;
                 }
                 session->start();
 
-                std::string sk_hex = bytes_to_hex(shared_key, crypto_box_BEFORENMBYTES);
                 wxCommandEvent event(wxEVT_PEER_CONNECTED);
-                event.SetString(wxString::Format("%s;%s;%s", chat_id, peer_id, sk_hex));
+                event.SetClientData(conn_data);
                 wxQueueEvent(event_handler_, event.Clone());
             }
         } catch (const std::exception& e) {
@@ -412,11 +982,11 @@ public:
         }
     }
 
-    void send_message(const std::string& chat_id, const std::string& message) {
+    void send_raw(const std::string& chat_id, const std::vector<unsigned char>& framed_data) {
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         auto it = sessions_.find(chat_id);
         if (it != sessions_.end()) {
-            it->second->send_message(message);
+            it->second->send_raw(framed_data);
         }
     }
 
@@ -524,154 +1094,6 @@ private:
     int next_pending_id_ = 0;
 };
 
-class ServerClient {
-public:
-    ServerClient() : socket_(io_context_), event_handler_(nullptr) {}
-
-    ~ServerClient() {
-        disconnect();
-    }
-
-    bool connect(const std::string& host, const std::string& port, wxEvtHandler* handler) {
-        try {
-            event_handler_ = handler;
-            tcp::resolver resolver(io_context_);
-            auto endpoints = resolver.resolve(host, port);
-            boost::asio::connect(socket_, endpoints);
-
-            start_read();
-            io_thread_ = std::thread([this]() { io_context_.run(); });
-
-            return true;
-        } catch (const std::exception& e) {
-            wxLogError("Connection error: %s", e.what());
-            return false;
-        }
-    }
-
-    void send(const std::string& message) {
-        try {
-            std::string msg = message + "\n";
-            boost::asio::async_write(socket_, boost::asio::buffer(msg),
-                [](const boost::system::error_code& ec, std::size_t) {
-                    if (ec) {
-                        wxLogError("Send error: %s", ec.message().c_str());
-                    }
-                });
-        } catch (const std::exception& e) {
-            wxLogError("Send error: %s", e.what());
-        }
-    }
-
-    void disconnect() {
-        boost::asio::post(io_context_, [this]() {
-            if (socket_.is_open()) {
-                socket_.close();
-            }
-        });
-
-        if (io_thread_.joinable()) {
-            io_thread_.join();
-        }
-    }
-
-private:
-    void start_read() {
-        boost::asio::async_read_until(socket_, buffer_, '\n',
-            [this](const boost::system::error_code& error, std::size_t) {
-                if (!error) {
-                    std::istream is(&buffer_);
-                    std::string message;
-                    std::getline(is, message);
-
-                    if (event_handler_) {
-                        wxCommandEvent event(wxEVT_MESSAGE_RECEIVED);
-                        event.SetString(wxString::FromUTF8(message));
-                        wxQueueEvent(event_handler_, event.Clone());
-                    }
-
-                    start_read();
-                } else if (error != boost::asio::error::operation_aborted) {
-                    wxLogError("Read error: %s", error.message().c_str());
-                }
-            });
-    }
-
-    boost::asio::io_context io_context_;
-    tcp::socket socket_;
-    wxEvtHandler* event_handler_;
-    boost::asio::streambuf buffer_;
-    std::thread io_thread_;
-};
-
-
-class SettingsDialog : public wxDialog {
-public:
-    SettingsDialog(wxWindow* parent, ConnectionMode current_mode)
-        : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(400, 250)) {
-
-        auto* sizer = new wxBoxSizer(wxVERTICAL);
-
-        sizer->Add(new wxStaticText(this, wxID_ANY, "Connection Mode:"), 0, wxALL, 10);
-
-        wxArrayString modes;
-        modes.Add("Peer-to-Peer (No Server)");
-        modes.Add("Server Mode");
-
-        mode_choice_ = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, modes);
-        mode_choice_->SetSelection(current_mode == ConnectionMode::PEER_TO_PEER ? 0 : 1);
-        sizer->Add(mode_choice_, 0, wxEXPAND | wxALL, 10);
-
-        server_panel_ = new wxPanel(this);
-        auto* server_sizer = new wxBoxSizer(wxVERTICAL);
-
-        auto* host_sizer = new wxBoxSizer(wxHORIZONTAL);
-        host_sizer->Add(new wxStaticText(server_panel_, wxID_ANY, "Server Host:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-        server_host_ = new wxTextCtrl(server_panel_, wxID_ANY, "127.0.0.1");
-        host_sizer->Add(server_host_, 1, wxEXPAND);
-        server_sizer->Add(host_sizer, 0, wxEXPAND | wxALL, 5);
-
-        auto* port_sizer = new wxBoxSizer(wxHORIZONTAL);
-        port_sizer->Add(new wxStaticText(server_panel_, wxID_ANY, "Server Port:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-        server_port_ = new wxTextCtrl(server_panel_, wxID_ANY, "12345");
-        port_sizer->Add(server_port_, 1, wxEXPAND);
-        server_sizer->Add(port_sizer, 0, wxEXPAND | wxALL, 5);
-
-        server_panel_->SetSizer(server_sizer);
-        sizer->Add(server_panel_, 0, wxEXPAND | wxALL, 10);
-
-        server_panel_->Enable(current_mode == ConnectionMode::SERVER);
-
-        mode_choice_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) {
-            server_panel_->Enable(mode_choice_->GetSelection() == 1);
-        });
-
-        auto* button_sizer = new wxBoxSizer(wxHORIZONTAL);
-        auto* ok_btn = new wxButton(this, wxID_OK, "OK");
-        auto* cancel_btn = new wxButton(this, wxID_CANCEL, "Cancel");
-        button_sizer->Add(ok_btn, 0, wxALL, 5);
-        button_sizer->Add(cancel_btn, 0, wxALL, 5);
-        sizer->Add(button_sizer, 0, wxALIGN_CENTER | wxALL, 10);
-
-        SetSizer(sizer);
-        Centre();
-    }
-
-    ConnectionMode get_mode() const {
-        return mode_choice_->GetSelection() == 0 ? ConnectionMode::PEER_TO_PEER : ConnectionMode::SERVER;
-    }
-
-    std::string get_server_host() const { return server_host_->GetValue().ToStdString(); }
-    std::string get_server_port() const { return server_port_->GetValue().ToStdString(); }
-
-private:
-    wxChoice* mode_choice_;
-    wxPanel* server_panel_;
-    wxTextCtrl* server_host_;
-    wxTextCtrl* server_port_;
-};
-
-
 class NewChatDialog : public wxDialog {
 public:
     NewChatDialog(wxWindow* parent)
@@ -711,7 +1133,6 @@ private:
     wxTextCtrl* address_input_;
     wxTextCtrl* port_input_;
 };
-
 
 class AliasDialog : public wxDialog {
 public:
@@ -754,11 +1175,9 @@ private:
     wxTextCtrl* message_input_;
     wxButton* send_button_;
     wxButton* new_chat_button_;
-    wxButton* settings_button_;
     wxButton* end_chat_button_;
 
     std::string current_user_id_;
-    ConnectionMode connection_mode_;
     std::map<std::string, ChatInfo> chats_;
     std::string active_chat_id_;
 
@@ -766,12 +1185,9 @@ private:
     unsigned char my_sk_[crypto_box_SECRETKEYBYTES];
 
     std::unique_ptr<P2PManager> p2p_manager_;
-    std::unique_ptr<ServerClient> server_client_;
-    bool connected_;
 
     void OnNewChat(wxCommandEvent& event);
     void OnSend(wxCommandEvent& event);
-    void OnSettings(wxCommandEvent& event);
     void OnEndChat(wxCommandEvent& event);
     void OnChatSelected(wxCommandEvent& event);
     void OnMessageReceived(wxCommandEvent& event);
@@ -781,7 +1197,6 @@ private:
     void OnClose(wxCloseEvent& event);
     void OnChatListDClick(wxCommandEvent& event);
 
-    void UpdateUI();
     void RefreshChatList();
     void LoadChatMessages(const std::string& chat_id);
     void RegenerateUserID();
@@ -794,7 +1209,6 @@ private:
 enum {
     ID_Send = wxID_HIGHEST + 1,
     ID_NewChat,
-    ID_Settings,
     ID_EndChat,
     ID_ChatList
 };
@@ -802,7 +1216,6 @@ enum {
 wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_BUTTON(ID_Send, MyFrame::OnSend)
     EVT_BUTTON(ID_NewChat, MyFrame::OnNewChat)
-    EVT_BUTTON(ID_Settings, MyFrame::OnSettings)
     EVT_BUTTON(ID_EndChat, MyFrame::OnEndChat)
     EVT_LISTBOX(ID_ChatList, MyFrame::OnChatSelected)
     EVT_LISTBOX_DCLICK(ID_ChatList, MyFrame::OnChatListDClick)
@@ -825,15 +1238,13 @@ bool MyApp::OnInit() {
         wxMessageBox("Failed to initialize libsodium!", "Fatal Error", wxOK | wxICON_ERROR);
         return false;
     }
-    auto* frame = new MyFrame("RetroMessenger - P2P Encrypted");
+    auto* frame = new MyFrame("RetroMessenger - P2P Encrypted (Double Ratchet)");
     frame->Show(true);
     return true;
 }
 
 MyFrame::MyFrame(const wxString& title)
-    : wxFrame(nullptr, wxID_ANY, title, wxDefaultPosition, wxSize(900, 600)),
-      connection_mode_(ConnectionMode::PEER_TO_PEER),
-      connected_(false) {
+    : wxFrame(nullptr, wxID_ANY, title, wxDefaultPosition, wxSize(900, 600)) {
 
     current_user_id_ = generateUniqueID();
     RegenerateKeypair();
@@ -849,9 +1260,6 @@ MyFrame::MyFrame(const wxString& title)
     port_label_ = new wxStaticText(top_bar, wxID_ANY, "Port: ...");
     info_sizer->Add(port_label_, 0, wxALL, 5);
     top_sizer->Add(info_sizer, 1, wxEXPAND);
-
-    settings_button_ = new wxButton(top_bar, ID_Settings, "Settings");
-    top_sizer->Add(settings_button_, 0, wxALL, 5);
 
     top_bar->SetSizer(top_sizer);
     main_sizer->Add(top_bar, 0, wxEXPAND | wxALL, 5);
@@ -914,33 +1322,25 @@ MyFrame::MyFrame(const wxString& title)
 
     p2p_manager_ = std::make_unique<P2PManager>(this, my_pk_, my_sk_);
     port_label_->SetLabel(wxString::Format("Port: %d", p2p_manager_->get_listening_port()));
-
-    UpdateUI();
 }
 
 MyFrame::~MyFrame() {
     p2p_manager_.reset();
-    server_client_.reset();
     sodium_memzero(my_sk_, sizeof(my_sk_));
     sodium_memzero(my_pk_, sizeof(my_pk_));
 }
 
 void MyFrame::OnNewChat(wxCommandEvent& event) {
-    if (connection_mode_ == ConnectionMode::PEER_TO_PEER) {
-        NewChatDialog dialog(this);
-        if (dialog.ShowModal() == wxID_OK) {
-            std::string peer_address = dialog.get_address();
-            std::string peer_port = dialog.get_port();
+    NewChatDialog dialog(this);
+    if (dialog.ShowModal() == wxID_OK) {
+        std::string peer_address = dialog.get_address();
+        std::string peer_port = dialog.get_port();
 
-            if (!peer_address.empty() && !peer_port.empty()) {
-                p2p_manager_->send_invitation(peer_address, peer_port, current_user_id_);
-                wxMessageBox("Invitation sent to " + peer_address + ":" + peer_port,
-                             "Info", wxOK | wxICON_INFORMATION);
-            }
+        if (!peer_address.empty() && !peer_port.empty()) {
+            p2p_manager_->send_invitation(peer_address, peer_port, current_user_id_);
+            wxMessageBox("Invitation sent to " + peer_address + ":" + peer_port,
+                         "Info", wxOK | wxICON_INFORMATION);
         }
-    } else {
-        wxMessageBox("Server mode not fully implemented in this version",
-                     "Info", wxOK | wxICON_INFORMATION);
     }
 }
 
@@ -952,55 +1352,15 @@ void MyFrame::OnSend(wxCommandEvent& event) {
 
     std::string msg = message.ToStdString();
 
-    if (connection_mode_ == ConnectionMode::PEER_TO_PEER) {
-        p2p_manager_->send_message(active_chat_id_, msg);
-    } else {
-        if (server_client_) {
-            server_client_->send(msg);
-        }
-    }
-
     auto& chat = chats_[active_chat_id_];
-    chat.messageCache.push_back({truncateID(current_user_id_), msg});
 
+    auto encrypted = seal_message_ratchet(msg, chat.ratchet);
+    auto framed = frame_encode(encrypted);
+    p2p_manager_->send_raw(active_chat_id_, framed);
+
+    chat.messageCache.push_back({truncateID(current_user_id_), msg});
     chat_display_->AppendText(truncateID(current_user_id_) + ": " + message + "\n");
     message_input_->Clear();
-}
-
-void MyFrame::OnSettings(wxCommandEvent& event) {
-    SettingsDialog dialog(this, connection_mode_);
-    if (dialog.ShowModal() == wxID_OK) {
-        ConnectionMode new_mode = dialog.get_mode();
-
-        if (new_mode != connection_mode_) {
-            connection_mode_ = new_mode;
-
-            if (connection_mode_ == ConnectionMode::PEER_TO_PEER) {
-                server_client_.reset();
-                if (!p2p_manager_) {
-                    p2p_manager_ = std::make_unique<P2PManager>(this, my_pk_, my_sk_);
-                    port_label_->SetLabel(wxString::Format("Port: %d", p2p_manager_->get_listening_port()));
-                }
-                SetTitle("RetroMessenger - P2P Encrypted");
-            } else {
-                p2p_manager_.reset();
-                server_client_ = std::make_unique<ServerClient>();
-
-                std::string host = dialog.get_server_host();
-                std::string port = dialog.get_server_port();
-
-                if (server_client_->connect(host, port, this)) {
-                    connected_ = true;
-                    SetTitle("RetroMessenger - Server Mode");
-                    wxMessageBox("Connected to server", "Success", wxOK | wxICON_INFORMATION);
-                } else {
-                    wxMessageBox("Failed to connect to server", "Error", wxOK | wxICON_ERROR);
-                }
-            }
-
-            UpdateUI();
-        }
-    }
 }
 
 void MyFrame::OnEndChat(wxCommandEvent& event) {
@@ -1012,13 +1372,11 @@ void MyFrame::OnEndChat(wxCommandEvent& event) {
                              "Confirm", wxYES_NO | wxICON_QUESTION);
 
     if (answer == wxYES) {
-        if (connection_mode_ == ConnectionMode::PEER_TO_PEER) {
-            p2p_manager_->close_chat(active_chat_id_);
-        }
+        p2p_manager_->close_chat(active_chat_id_);
 
         auto it = chats_.find(active_chat_id_);
         if (it != chats_.end()) {
-            sodium_memzero(it->second.shared_key, sizeof(it->second.shared_key));
+            it->second.ratchet.zero();
         }
 
         chats_.erase(active_chat_id_);
@@ -1071,23 +1429,24 @@ void MyFrame::OnChatListDClick(wxCommandEvent& event) {
 }
 
 void MyFrame::OnMessageReceived(wxCommandEvent& event) {
-    wxString message = event.GetString();
-    std::string* chat_id_ptr = static_cast<std::string*>(event.GetClientData());
+    auto* msg_data = static_cast<ReceivedMessageData*>(event.GetClientData());
+    if (!msg_data) return;
 
-    if (chat_id_ptr) {
-        std::string chat_id = *chat_id_ptr;
-        delete chat_id_ptr;
+    std::string chat_id = msg_data->chat_id;
+    auto it = chats_.find(chat_id);
+    if (it != chats_.end()) {
+        std::string message = unseal_message_ratchet(
+            msg_data->payload.data(), msg_data->payload.size(),
+            it->second.ratchet);
 
-        auto it = chats_.find(chat_id);
-        if (it != chats_.end()) {
-            std::string sender_display = truncateID(it->second.peerID);
-            it->second.messageCache.push_back({sender_display, message.ToStdString()});
+        std::string sender_display = truncateID(it->second.peerID);
+        it->second.messageCache.push_back({sender_display, message});
 
-            if (chat_id == active_chat_id_) {
-                chat_display_->AppendText(sender_display + ": " + message + "\n");
-            }
+        if (chat_id == active_chat_id_) {
+            chat_display_->AppendText(sender_display + ": " + message + "\n");
         }
     }
+    delete msg_data;
 }
 
 void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
@@ -1117,6 +1476,7 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                     wxLogError("Invalid peer public key");
                     return;
                 }
+
                 unsigned char shared_key[crypto_box_BEFORENMBYTES];
                 if (crypto_box_beforenm(shared_key, peer_pk.data(), my_sk_) != 0) {
                     wxLogError("Failed to compute shared key");
@@ -1124,15 +1484,18 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 }
 
                 std::string chat_id = generateUniqueID();
-                auto session = std::make_shared<P2PSession>(std::move(socket), this,
-                                                             chat_id, shared_key);
+                auto session = std::make_shared<P2PSession>(std::move(socket), this, chat_id);
 
                 ChatInfo info;
                 info.chatID = chat_id;
                 info.peerID = peer_id;
                 info.localAlias = "";
-                std::memcpy(info.shared_key, shared_key, crypto_box_BEFORENMBYTES);
                 info.active = true;
+                info.is_initiator = false;
+
+                init_ratchet(info.ratchet, shared_key, false);
+                sodium_memzero(shared_key, sizeof(shared_key));
+
                 chats_[chat_id] = info;
 
                 p2p_manager_->add_session(chat_id, session);
@@ -1145,7 +1508,6 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 wxMessageBox("Encrypted chat started with " + truncateID(peer_id),
                              "Success", wxOK | wxICON_INFORMATION);
 
-                sodium_memzero(shared_key, sizeof(shared_key));
             } catch (const std::exception& e) {
                 wxLogError("Error accepting invitation: %s", e.what());
             }
@@ -1155,40 +1517,33 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 std::string reject_msg = "REJECT\n";
                 boost::asio::write(socket, boost::asio::buffer(reject_msg));
             } catch (...) {
-                
             }
         }
     }
 }
 
 void MyFrame::OnPeerConnected(wxCommandEvent& event) {
-    wxString data = event.GetString();
-    wxArrayString parts = wxSplit(data, ';');
+    auto* conn_data = static_cast<PeerConnectedData*>(event.GetClientData());
+    if (!conn_data) return;
 
-    if (parts.GetCount() >= 3) {
-        std::string chat_id = parts[0].ToStdString();
-        std::string peer_id = parts[1].ToStdString();
-        std::string sk_hex = parts[2].ToStdString();
+    ChatInfo info;
+    info.chatID = conn_data->chat_id;
+    info.peerID = conn_data->peer_id;
+    info.localAlias = "";
+    info.active = true;
+    info.is_initiator = true;
+    info.ratchet = conn_data->ratchet;
 
-        auto sk_bytes = hex_to_bytes(sk_hex);
+    chats_[conn_data->chat_id] = info;
 
-        ChatInfo info;
-        info.chatID = chat_id;
-        info.peerID = peer_id;
-        info.localAlias = "";
-        info.active = true;
-        if (sk_bytes.size() == crypto_box_BEFORENMBYTES) {
-            std::memcpy(info.shared_key, sk_bytes.data(), crypto_box_BEFORENMBYTES);
-        }
-        chats_[chat_id] = info;
+    RegenerateUserID();
+    RegenerateKeypair();
 
-        RegenerateUserID();
-        RegenerateKeypair();
+    RefreshChatList();
+    wxMessageBox("Encrypted connection established with " + truncateID(conn_data->peer_id),
+                 "Success", wxOK | wxICON_INFORMATION);
 
-        RefreshChatList();
-        wxMessageBox("Encrypted connection established with " + truncateID(peer_id),
-                     "Success", wxOK | wxICON_INFORMATION);
-    }
+    delete conn_data;
 }
 
 void MyFrame::OnPeerDisconnected(wxCommandEvent& event) {
@@ -1209,26 +1564,17 @@ void MyFrame::OnPeerDisconnected(wxCommandEvent& event) {
             send_button_->Enable(false);
         }
 
-        sodium_memzero(it->second.shared_key, sizeof(it->second.shared_key));
+        it->second.ratchet.zero();
         RefreshChatList();
     }
 }
 
 void MyFrame::OnClose(wxCloseEvent& event) {
     for (auto& [id, info] : chats_) {
-        sodium_memzero(info.shared_key, sizeof(info.shared_key));
+        info.ratchet.zero();
     }
     p2p_manager_.reset();
-    server_client_.reset();
     event.Skip();
-}
-
-void MyFrame::UpdateUI() {
-    if (connection_mode_ == ConnectionMode::PEER_TO_PEER) {
-        new_chat_button_->Enable(true);
-    } else {
-        new_chat_button_->Enable(connected_);
-    }
 }
 
 void MyFrame::RefreshChatList() {
