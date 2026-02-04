@@ -22,6 +22,3 @@ pkg_check_modules(ZSTD REQUIRED libzstd)
 add_executable(RetroMessenger main.cpp)
 target_include_directories(RetroMessenger PRIVATE ${SODIUM_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIRS})
 target_link_libraries(RetroMessenger ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES} ${SODIUM_LIBRARIES} ${ZSTD_LIBRARIES})
-
-add_executable(ChatServer server.cpp)
-target_link_libraries(ChatServer ${Boost_LIBRARIES} pthread)
