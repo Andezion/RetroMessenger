@@ -23,7 +23,6 @@ std::vector<unsigned char> frame_encode_string(const std::string& s) {
     return frame_encode(payload);
 }
 
-// P2PSession implementation
 P2PSession::P2PSession(tcp::socket socket, wxEvtHandler* handler, const std::string& chatID)
     : socket_(std::move(socket)), event_handler_(handler), chat_id_(chatID)
 {
@@ -115,7 +114,6 @@ void P2PSession::notify_disconnect() {
     }
 }
 
-// P2PManager implementation
 P2PManager::P2PManager(wxEvtHandler* handler,
                        const unsigned char* my_pk, const unsigned char* my_sk,
                        unsigned short port)
