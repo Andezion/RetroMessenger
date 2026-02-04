@@ -9,7 +9,6 @@
 #include "crypto_utils.h"
 #include "protocol.h"
 
-// Chat information structure
 struct ChatInfo {
     std::string chatID;
     std::string peerID;
@@ -20,7 +19,6 @@ struct ChatInfo {
     bool is_initiator;
 };
 
-// Dialog for starting a new chat
 class NewChatDialog : public wxDialog {
 public:
     NewChatDialog(wxWindow* parent);
@@ -33,7 +31,6 @@ private:
     wxTextCtrl* port_input_;
 };
 
-// Dialog for setting peer alias
 class AliasDialog : public wxDialog {
 public:
     AliasDialog(wxWindow* parent, const std::string& peer_id);
@@ -44,7 +41,6 @@ private:
     wxTextCtrl* alias_input_;
 };
 
-// Main application frame
 class MyFrame : public wxFrame {
 public:
     MyFrame(const wxString& title);
@@ -89,7 +85,6 @@ private:
     wxDECLARE_EVENT_TABLE();
 };
 
-// Event IDs
 enum {
     ID_Send = wxID_HIGHEST + 1,
     ID_NewChat,
