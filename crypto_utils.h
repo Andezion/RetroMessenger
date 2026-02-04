@@ -4,15 +4,12 @@
 #include <vector>
 #include <sodium.h>
 
-// Hex conversion utilities
 std::string bytes_to_hex(const unsigned char* data, size_t len);
 std::vector<unsigned char> hex_to_bytes(const std::string& hex);
 
-// Padding utilities
 std::vector<unsigned char> pad_data(const std::vector<unsigned char>& input);
 std::vector<unsigned char> unpad_data(const std::vector<unsigned char>& input);
 
-// Key derivation
 void kdf_derive_pair(
     const unsigned char* input_key, size_t input_len,
     const unsigned char* salt, size_t salt_len,
@@ -37,7 +34,6 @@ void compute_message_hash(
     uint32_t counter,
     unsigned char out_hash[32]);
 
-// Ratchet state and operations
 struct RatchetState {
     unsigned char root_key[32];
     unsigned char send_chain_key[32];
@@ -72,6 +68,5 @@ std::string unseal_message_ratchet(
     const unsigned char* data, size_t len,
     RatchetState& ratchet);
 
-// ID utilities
 std::string generateUniqueID();
 std::string truncateID(const std::string& id);
