@@ -2,7 +2,6 @@
 #include <wx/msgdlg.h>
 #include <sodium.h>
 
-// NewChatDialog implementation
 NewChatDialog::NewChatDialog(wxWindow* parent)
     : wxDialog(parent, wxID_ANY, "Start New Chat", wxDefaultPosition, wxSize(450, 280)) {
 
@@ -41,7 +40,6 @@ std::string NewChatDialog::get_port() const {
     return port_input_->GetValue().ToStdString();
 }
 
-// AliasDialog implementation
 AliasDialog::AliasDialog(wxWindow* parent, const std::string& peer_id)
     : wxDialog(parent, wxID_ANY, "Set Alias", wxDefaultPosition, wxSize(400, 180)) {
 
@@ -66,7 +64,6 @@ std::string AliasDialog::get_alias() const {
     return alias_input_->GetValue().ToStdString();
 }
 
-// MyFrame event table
 wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_BUTTON(ID_Send, MyFrame::OnSend)
     EVT_BUTTON(ID_NewChat, MyFrame::OnNewChat)
@@ -80,7 +77,6 @@ wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_CLOSE(MyFrame::OnClose)
 wxEND_EVENT_TABLE()
 
-// MyFrame implementation
 MyFrame::MyFrame(const wxString& title)
     : wxFrame(nullptr, wxID_ANY, title, wxDefaultPosition, wxSize(900, 600)) {
 
