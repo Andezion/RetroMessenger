@@ -19,7 +19,6 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED libsodium)
 pkg_check_modules(ZSTD REQUIRED libzstd)
 
-# Source files organized by module
 set(CRYPTO_SOURCES
     crypto_utils.cpp
 )
