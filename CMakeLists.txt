@@ -37,7 +37,7 @@ set(GUI_SOURCES
 )
 
 set(MAIN_SOURCE
-    main_new.cpp
+    main.cpp
 )
 
 add_executable(RetroMessenger 
