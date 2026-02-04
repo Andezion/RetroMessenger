@@ -19,6 +19,35 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(SODIUM REQUIRED libsodium)
 pkg_check_modules(ZSTD REQUIRED libzstd)
 
-add_executable(RetroMessenger main.cpp)
+# Source files organized by module
+set(CRYPTO_SOURCES
+    crypto_utils.cpp
+)
+
+set(COMPRESSION_SOURCES
+    tans_compression.cpp
+    compression.cpp
+)
+
+set(PROTOCOL_SOURCES
+    protocol.cpp
+)
+
+set(GUI_SOURCES
+    gui.cpp
+)
+
+set(MAIN_SOURCE
+    main_new.cpp
+)
+
+add_executable(RetroMessenger 
+    ${MAIN_SOURCE}
+    ${CRYPTO_SOURCES}
+    ${COMPRESSION_SOURCES}
+    ${PROTOCOL_SOURCES}
+    ${GUI_SOURCES}
+)
+
 target_include_directories(RetroMessenger PRIVATE ${SODIUM_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIRS})
 target_link_libraries(RetroMessenger ${wxWidgets_LIBRARIES} ${Boost_LIBRARIES} ${SODIUM_LIBRARIES} ${ZSTD_LIBRARIES})
