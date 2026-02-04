@@ -92,3 +92,4 @@ sudo apt install build-essential cmake libwxgtk3.0-gtk3-dev libboost-system-dev
 - ID автоматически обновляется после каждого нового соединения
 - Прямые P2P соединения без посредников
 
+Compression: tANS for short messages, Zstandard for long messages
