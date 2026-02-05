@@ -10,6 +10,8 @@
 #include <mutex>
 #include "crypto_utils.h"
 
+enum class EncryptionMode;
+
 using boost::asio::ip::tcp;
 
 wxDECLARE_EVENT(wxEVT_MESSAGE_RECEIVED, wxCommandEvent);
@@ -29,6 +31,7 @@ struct PeerConnectedData {
     std::string chat_id;
     std::string peer_id;
     RatchetState ratchet;
+    EncryptionMode encryption_mode;
 };
 
 class P2PSession : public std::enable_shared_from_this<P2PSession> {
@@ -62,7 +65,7 @@ public:
 
     unsigned short get_listening_port() const;
     
-    void send_invitation(const std::string& peer_address, const std::string& peer_port,
+    void send_invitation(const std::string& peer_, EncryptionMode modeaddress, const std::string& peer_port,
                          const std::string& my_id);
     
     void send_raw(const std::string& chat_id, const std::vector<unsigned char>& framed_data);
