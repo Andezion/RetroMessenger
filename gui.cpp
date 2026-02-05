@@ -1,6 +1,35 @@
 #include "gui.h"
 #include <wx/msgdlg.h>
+#include <wx/log.h>
 #include <sodium.h>
+
+SettingsDialog::SettingsDialog(wxWindow* parent, EncryptionMode current_mode)
+    : wxDialog(parent, wxID_ANY, "Settings", wxDefaultPosition, wxSize(400, 200)) {
+
+    auto* sizer = new wxBoxSizer(wxVERTICAL);
+
+    sizer->Add(new wxStaticText(this, wxID_ANY, "Choose encryption protocol:"), 0, wxALL, 10);
+
+    wxArrayString choices;
+    choices.Add("Simple P2P (No Encryption)");
+    choices.Add("Double Ratchet (Encrypted)");
+
+    encryption_choice_ = new wxChoice(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, choices);
+    encryption_choice_->SetSelection(static_cast<int>(current_mode));
+    sizer->Add(encryption_choice_, 0, wxEXPAND | wxALL, 10);
+
+    auto* button_sizer = new wxBoxSizer(wxHORIZONTAL);
+    button_sizer->Add(new wxButton(this, wxID_OK, "OK"), 0, wxALL, 5);
+    button_sizer->Add(new wxButton(this, wxID_CANCEL, "Cancel"), 0, wxALL, 5);
+    sizer->Add(button_sizer, 0, wxALIGN_CENTER | wxALL, 10);
+
+    SetSizer(sizer);
+    Centre();
+}
+
+EncryptionMode SettingsDialog::get_encryption_mode() const {
+    return static_cast<EncryptionMode>(encryption_choice_->GetSelection());
+}
 
 NewChatDialog::NewChatDialog(wxWindow* parent)
     : wxDialog(parent, wxID_ANY, "Start New Chat", wxDefaultPosition, wxSize(450, 280)) {
@@ -67,6 +96,7 @@ std::string AliasDialog::get_alias() const {
 wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_BUTTON(ID_Send, MyFrame::OnSend)
     EVT_BUTTON(ID_NewChat, MyFrame::OnNewChat)
+    EVT_BUTTON(ID_Settings, MyFrame::OnSettings)
     EVT_BUTTON(ID_EndChat, MyFrame::OnEndChat)
     EVT_LISTBOX(ID_ChatList, MyFrame::OnChatSelected)
     EVT_LISTBOX_DCLICK(ID_ChatList, MyFrame::OnChatListDClick)
@@ -77,8 +107,8 @@ wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_CLOSE(MyFrame::OnClose)
 wxEND_EVENT_TABLE()
 
-MyFrame::MyFrame(const wxString& title)
-    : wxFrame(nullptr, wxID_ANY, title, wxDefaultPosition, wxSize(900, 600)) {
+MyFrame::MyFrame(const wxString& title),
+      current_encryption_mode_(EncryptionMode::DOUBLE_RATCHET) {
 
     current_user_id_ = generateUniqueID();
     RegenerateKeypair();
@@ -93,6 +123,10 @@ MyFrame::MyFrame(const wxString& title)
     info_sizer->Add(user_id_label_, 0, wxALL, 5);
     port_label_ = new wxStaticText(top_bar, wxID_ANY, "Port: ...");
     info_sizer->Add(port_label_, 0, wxALL, 5);
+    top_sizer->Add(info_sizer, 1, wxEXPAND);
+
+    settings_button_ = new wxButton(top_bar, ID_Settings, "Settings");
+    top_sizer->Add(settings_button_, 0, wxALL, 5 5);
     top_sizer->Add(info_sizer, 1, wxEXPAND);
 
     top_bar->SetSizer(top_sizer);
@@ -171,10 +205,21 @@ void MyFrame::OnNewChat(wxCommandEvent& event) {
         std::string peer_port = dialog.get_port();
 
         if (!peer_address.empty() && !peer_port.empty()) {
-            p2p_manager_->send_invitation(peer_address, peer_port, current_user_id_);
-            wxMessageBox("Invitation sent to " + peer_address + ":" + peer_port,
-                         "Info", wxOK | wxICON_INFORMATION);
+            wxLogMessage("Attempting to connect to %s:%s...", peer_address, peer_port);
+            p2p_manager_->send_invitation(peer_address, peer_port, current_user_id_, current_encryption_mode_);
         }
+    }
+}
+
+void MyFrame::OnSettings(wxCommandEvent& event) {
+    SettingsDialog dialog(this, current_encryption_mode_);
+    if (dialog.ShowModal() == wxID_OK) {
+        current_encryption_mode_ = dialog.get_encryption_mode();
+        
+        std::string mode_str = (current_encryption_mode_ == EncryptionMode::SIMPLE_P2P) 
+                              ? "Simple P2P" : "Double Ratchet";
+        wxMessageBox("Encryption mode set to: " + mode_str, "Settings", wxOK | wxICON_INFORMATION);
+        wxLogMessage("Encryption mode changed to: %s", mode_str);
     }
 }
 
@@ -185,11 +230,17 @@ void MyFrame::OnSend(wxCommandEvent& event) {
     }
 
     std::string msg = message.ToStdString();
-
     auto& chat = chats_[active_chat_id_];
 
-    auto encrypted = seal_message_ratchet(msg, chat.ratchet);
-    auto framed = frame_encode(encrypted);
+    std::vector<unsigned char> framed;
+    
+    if (chat.encryption_mode == EncryptionMode::DOUBLE_RATCHET) {
+        auto encrypted = seal_message_ratchet(msg, chat.ratchet);
+        framed = frame_encode(encrypted);
+    } else {
+        framed = frame_encode_string(msg);
+    }
+    
     p2p_manager_->send_raw(active_chat_id_, framed);
 
     chat.messageCache.push_back({truncateID(current_user_id_), msg});
@@ -269,9 +320,15 @@ void MyFrame::OnMessageReceived(wxCommandEvent& event) {
     std::string chat_id = msg_data->chat_id;
     auto it = chats_.find(chat_id);
     if (it != chats_.end()) {
-        std::string message = unseal_message_ratchet(
-            msg_data->payload.data(), msg_data->payload.size(),
-            it->second.ratchet);
+        std::string message;
+        
+        if (it->second.encryption_mode == EncryptionMode::DOUBLE_RATCHET) {
+            message = unseal_message_ratchet(
+                msg_data->payload.data(), msg_data->payload.size(),
+                it->second.ratchet);
+        } else {
+            message = std::string(msg_data->payload.begin(), msg_data->payload.end());
+        }
 
         std::string sender_display = truncateID(it->second.peerID);
         it->second.messageCache.push_back({sender_display, message});
@@ -287,14 +344,20 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
     wxString data = event.GetString();
     wxArrayString parts = wxSplit(data, ';');
 
-    if (parts.GetCount() >= 3) {
+    if (parts.GetCount() >= 4) {
         std::string peer_id = parts[0].ToStdString();
         std::string peer_pk_hex = parts[1].ToStdString();
         int pending_socket_id = 0;
         parts[2].ToLong(reinterpret_cast<long*>(&pending_socket_id));
+        EncryptionMode mode = static_cast<EncryptionMode>(wxAtoi(parts[3]));
+
+        std::string mode_str = (mode == EncryptionMode::SIMPLE_P2P) 
+                              ? "Simple P2P" : "Double Ratchet Encrypted";
+
+        wxLogMessage("Invitation received from %s (mode: %s)", truncateID(peer_id), mode_str);
 
         int answer = wxMessageBox(
-            "Peer " + truncateID(peer_id) + " wants to start an encrypted chat. Accept?",
+            "Peer " + truncateID(peer_id) + " wants to start a chat (" + mode_str + "). Accept?",
             "Chat Invitation", wxYES_NO | wxICON_QUESTION);
 
         if (answer == wxYES) {
@@ -302,20 +365,8 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 auto socket = p2p_manager_->take_pending_socket(pending_socket_id);
 
                 std::string pk_hex = bytes_to_hex(my_pk_, crypto_box_PUBLICKEYBYTES);
-                std::string accept_msg = "ACCEPT:" + pk_hex + ":" + current_user_id_ + "\n";
+                std::string accept_msg = "ACCEPT:" + pk_hex + ":" + current_user_id_ + ":" + std::to_string(static_cast<int>(mode)) + "\n";
                 boost::asio::write(socket, boost::asio::buffer(accept_msg));
-
-                auto peer_pk = hex_to_bytes(peer_pk_hex);
-                if (peer_pk.size() != crypto_box_PUBLICKEYBYTES) {
-                    wxLogError("Invalid peer public key");
-                    return;
-                }
-
-                unsigned char shared_key[crypto_box_BEFORENMBYTES];
-                if (crypto_box_beforenm(shared_key, peer_pk.data(), my_sk_) != 0) {
-                    wxLogError("Failed to compute shared key");
-                    return;
-                }
 
                 std::string chat_id = generateUniqueID();
                 auto session = std::make_shared<P2PSession>(std::move(socket), this, chat_id);
@@ -326,9 +377,24 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 info.localAlias = "";
                 info.active = true;
                 info.is_initiator = false;
+                info.encryption_mode = mode;
 
-                init_ratchet(info.ratchet, shared_key, false);
-                sodium_memzero(shared_key, sizeof(shared_key));
+                if (mode == EncryptionMode::DOUBLE_RATCHET) {
+                    auto peer_pk = hex_to_bytes(peer_pk_hex);
+                    if (peer_pk.size() != crypto_box_PUBLICKEYBYTES) {
+                        wxLogError("Invalid peer public key");
+                        return;
+                    }
+
+                    unsigned char shared_key[crypto_box_BEFORENMBYTES];
+                    if (crypto_box_beforenm(shared_key, peer_pk.data(), my_sk_) != 0) {
+                        wxLogError("Failed to compute shared key");
+                        return;
+                    }
+
+                    init_ratchet(info.ratchet, shared_key, false);
+                    sodium_memzero(shared_key, sizeof(shared_key));
+                }
 
                 chats_[chat_id] = info;
 
@@ -336,10 +402,13 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
                 session->start();
 
                 RegenerateUserID();
-                RegenerateKeypair();
+                if (mode == EncryptionMode::DOUBLE_RATCHET) {
+                    RegenerateKeypair();
+                }
 
                 RefreshChatList();
-                wxMessageBox("Encrypted chat started with " + truncateID(peer_id),
+                wxLogMessage("Chat started with %s", truncateID(peer_id));
+                wxMessageBox("Chat started with " + truncateID(peer_id),
                              "Success", wxOK | wxICON_INFORMATION);
 
             } catch (const std::exception& e) {
@@ -366,15 +435,22 @@ void MyFrame::OnPeerConnected(wxCommandEvent& event) {
     info.localAlias = "";
     info.active = true;
     info.is_initiator = true;
-    info.ratchet = conn_data->ratchet;
+    info.encryption_mode = conn_data->encryption_mode;
+    
+    if (info.encryption_mode == EncryptionMode::DOUBLE_RATCHET) {
+        info.ratchet = conn_data->ratchet;
+    }
 
     chats_[conn_data->chat_id] = info;
 
     RegenerateUserID();
-    RegenerateKeypair();
+    if (info.encryption_mode == EncryptionMode::DOUBLE_RATCHET) {
+        RegenerateKeypair();
+    }
 
     RefreshChatList();
-    wxMessageBox("Encrypted connection established with " + truncateID(conn_data->peer_id),
+    wxLogMessage("Connection established with %s", truncateID(conn_data->peer_id));
+    wxMessageBox("Connection established with " + truncateID(conn_data->peer_id),
                  "Success", wxOK | wxICON_INFORMATION);
 
     delete conn_data;
