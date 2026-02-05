@@ -65,8 +65,8 @@ public:
 
     unsigned short get_listening_port() const;
     
-    void send_invitation(const std::string& peer_, EncryptionMode modeaddress, const std::string& peer_port,
-                         const std::string& my_id);
+    void send_invitation(const std::string& peer_address, const std::string& peer_port,
+                         const std::string& my_id, EncryptionMode mode);
     
     void send_raw(const std::string& chat_id, const std::vector<unsigned char>& framed_data);
     void add_session(const std::string& chat_id, std::shared_ptr<P2PSession> session);
