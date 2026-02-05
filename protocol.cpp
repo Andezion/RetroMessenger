@@ -1,4 +1,5 @@
 #include "protocol.h"
+#include "gui.h"
 #include <wx/log.h>
 #include <cstring>
 
@@ -150,70 +151,134 @@ unsigned short P2PManager::get_listening_port() const {
 }
 
 void P2PManager::send_invitation(const std::string& peer_address, const std::string& peer_port,
-                                  const std::string& my_id) {
-    auto socket = std::make_shared<tcp::socket>(io_context_);
+                                  const std::string& my_id, EncryptionMode mode) {
+    auto socket_ptr = std::make_shared<tcp::socket>(io_context_);
+    auto resolver_ptr = std::make_shared<tcp::resolver>(io_context_);
+    
+    wxLogMessage("[CONNECT] Starting async connection to %s:%s", peer_address, peer_port);
 
-    try {
-        tcp::resolver resolver(io_context_);
-        auto endpoints = resolver.resolve(peer_address, peer_port);
-        boost::asio::connect(*socket, endpoints);
-
-        socket->non_blocking(false);
-
-        std::string pk_hex = bytes_to_hex(my_pk_, crypto_box_PUBLICKEYBYTES);
-        std::string invite_msg = "INVITE:" + pk_hex + ":" + my_id + "\n";
-        boost::asio::write(*socket, boost::asio::buffer(invite_msg));
-
-        struct timeval tv;
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-        setsockopt(socket->native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-        boost::asio::streambuf buffer;
-        boost::asio::read_until(*socket, buffer, '\n');
-        std::istream is(&buffer);
-        std::string response;
-        std::getline(is, response);
-
-        if (response.substr(0, 6) == "ACCEPT") {
-            size_t pos1 = response.find(':', 7);
-            std::string peer_pk_hex = response.substr(7, pos1 - 7);
-            std::string peer_id = response.substr(pos1 + 1);
-
-            auto peer_pk = hex_to_bytes(peer_pk_hex);
-            if (peer_pk.size() != crypto_box_PUBLICKEYBYTES) {
-                wxLogError("Invalid peer public key size");
+    resolver_ptr->async_resolve(peer_address, peer_port,
+        [this, socket_ptr, resolver_ptr, my_id, mode, peer_address, peer_port]
+        (const boost::system::error_code& ec, tcp::resolver::results_type endpoints) {
+            if (ec) {
+                wxLogError("[CONNECT] Failed to resolve %s:%s - %s", 
+                          peer_address, peer_port, ec.message());
+                
+                wxCommandEvent* evt = new wxCommandEvent(wxEVT_COMMAND_BUTTON_CLICKED);
+                evt->SetString("Connection failed: " + ec.message());
+                wxQueueEvent(event_handler_, evt);
                 return;
             }
 
-            unsigned char shared_key[crypto_box_BEFORENMBYTES];
-            if (crypto_box_beforenm(shared_key, peer_pk.data(), my_sk_) != 0) {
-                wxLogError("Failed to compute shared key");
-                return;
-            }
+            wxLogMessage("[CONNECT] Resolved address, connecting...");
 
-            std::string chat_id = generateUniqueID();
+            boost::asio::async_connect(*socket_ptr, endpoints,
+                [this, socket_ptr, my_id, mode, peer_address, peer_port]
+                (const boost::system::error_code& ec, const tcp::endpoint&) {
+                    if (ec) {
+                        wxLogError("[CONNECT] Failed to connect to %s:%s - %s",
+                                  peer_address, peer_port, ec.message());
+                        
+                        wxCommandEvent* evt = new wxCommandEvent(wxEVT_COMMAND_BUTTON_CLICKED);
+                        evt->SetString("Connection failed: " + ec.message());
+                        wxQueueEvent(event_handler_, evt);
+                        return;
+                    }
 
-            auto* conn_data = new PeerConnectedData();
-            conn_data->chat_id = chat_id;
-            conn_data->peer_id = peer_id;
-            init_ratchet(conn_data->ratchet, shared_key, true);
-            sodium_memzero(shared_key, sizeof(shared_key));
+                    wxLogMessage("[CONNECT] TCP connected, sending invitation...");
 
-            auto session = std::make_shared<P2PSession>(std::move(*socket), event_handler_, chat_id);
-            {
-                std::lock_guard<std::mutex> lock(sessions_mutex_);
-                sessions_[chat_id] = session;
-            }
-            session->start();
+                    std::string pk_hex = bytes_to_hex(my_pk_, crypto_box_PUBLICKEYBYTES);
+                    std::string invite_msg = "INVITE:" + pk_hex + ":" + my_id + ":" + 
+                                            std::to_string(static_cast<int>(mode)) + "\n";
 
-            wxCommandEvent event(wxEVT_PEER_CONNECTED);
-            event.SetClientData(conn_data);
-            wxQueueEvent(event_handler_, event.Clone());
-        }
-    } catch (const std::exception& e) {
-        wxLogError("Failed to send invitation: %s", e.what());
-    }
+                    auto invite_buffer = std::make_shared<std::string>(invite_msg);
+                    boost::asio::async_write(*socket_ptr, boost::asio::buffer(*invite_buffer),
+                        [this, socket_ptr, invite_buffer, my_id, mode, peer_address, peer_port]
+                        (const boost::system::error_code& ec, std::size_t) {
+                            if (ec) {
+                                wxLogError("[CONNECT] Failed to send invitation - %s", ec.message());
+                                return;
+                            }
+
+                            wxLogMessage("[CONNECT] Invitation sent, waiting for response...");
+
+                            auto buffer_ptr = std::make_shared<boost::asio::streambuf>();
+                            boost::asio::async_read_until(*socket_ptr, *buffer_ptr, '\n',
+                                [this, socket_ptr, buffer_ptr, my_id, mode, peer_address, peer_port]
+                                (const boost::system::error_code& ec, std::size_t) {
+                                    if (ec) {
+                                        wxLogError("[CONNECT] Failed to read response - %s", ec.message());
+                                        return;
+                                    }
+
+                                    std::istream is(buffer_ptr.get());
+                                    std::string response;
+                                    std::getline(is, response);
+
+                                    wxLogMessage("[CONNECT] Received response: %s", response);
+
+                                    if (response.substr(0, 6) == "ACCEPT") {
+                                        size_t pos1 = response.find(':', 7);
+                                        size_t pos2 = response.find(':', pos1 + 1);
+                                        
+                                        std::string peer_pk_hex = response.substr(7, pos1 - 7);
+                                        std::string peer_id = response.substr(pos1 + 1, pos2 - pos1 - 1);
+                                        std::string mode_str = response.substr(pos2 + 1);
+                                        
+                                        EncryptionMode confirmed_mode = static_cast<EncryptionMode>(std::stoi(mode_str));
+
+                                        std::string chat_id = generateUniqueID();
+
+                                        auto* conn_data = new PeerConnectedData();
+                                        conn_data->chat_id = chat_id;
+                                        conn_data->peer_id = peer_id;
+                                        conn_data->encryption_mode = confirmed_mode;
+
+                                        if (confirmed_mode == EncryptionMode::DOUBLE_RATCHET) {
+                                            auto peer_pk = hex_to_bytes(peer_pk_hex);
+                                            if (peer_pk.size() != crypto_box_PUBLICKEYBYTES) {
+                                                wxLogError("[CONNECT] Invalid peer public key size");
+                                                return;
+                                            }
+
+                                            unsigned char shared_key[crypto_box_BEFORENMBYTES];
+                                            if (crypto_box_beforenm(shared_key, peer_pk.data(), my_sk_) != 0) {
+                                                wxLogError("[CONNECT] Failed to compute shared key");
+                                                return;
+                                            }
+
+                                            init_ratchet(conn_data->ratchet, shared_key, true);
+                                            sodium_memzero(shared_key, sizeof(shared_key));
+                                        }
+
+                                        auto session = std::make_shared<P2PSession>(
+                                            std::move(*socket_ptr), event_handler_, chat_id);
+                                        
+                                        {
+                                            std::lock_guard<std::mutex> lock(sessions_mutex_);
+                                            sessions_[chat_id] = session;
+                                        }
+                                        
+                                        session->start();
+
+                                        wxCommandEvent event(wxEVT_PEER_CONNECTED);
+                                        event.SetClientData(conn_data);
+                                        wxQueueEvent(event_handler_, event.Clone());
+
+                                        wxLogMessage("[CONNECT] Connection successful!");
+                                    } else if (response.substr(0, 6) == "REJECT") {
+                                        wxLogWarning("[CONNECT] Peer rejected the invitation");
+                                        
+                                        wxCommandEvent* evt = new wxCommandEvent(wxEVT_COMMAND_BUTTON_CLICKED);
+                                        evt->SetString("Peer rejected the connection");
+                                        wxQueueEvent(event_handler_, evt);
+                                    } else {
+                                        wxLogError("[CONNECT] Invalid response: %s", response);
+                                    }
+                                });
+                        });
+                });
+        });
 }
 
 void P2PManager::send_raw(const std::string& chat_id, const std::vector<unsigned char>& framed_data) {
@@ -272,30 +337,46 @@ void P2PManager::start_accept() {
 
 void P2PManager::handle_new_connection(tcp::socket socket) {
     try {
-        struct timeval tv;
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-        setsockopt(socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        wxLogMessage("[SERVER] New incoming connection");
 
-        boost::asio::streambuf buffer;
-        boost::asio::read_until(socket, buffer, '\n');
-        std::istream is(&buffer);
-        std::string invite_msg;
-        std::getline(is, invite_msg);
+        auto socket_ptr = std::make_shared<tcp::socket>(std::move(socket));
+        auto buffer_ptr = std::make_shared<boost::asio::streambuf>();
+        
+        boost::asio::async_read_until(*socket_ptr, *buffer_ptr, '\n',
+            [this, socket_ptr, buffer_ptr](const boost::system::error_code& ec, std::size_t) {
+                if (ec) {
+                    wxLogError("[SERVER] Error reading invitation: %s", ec.message());
+                    return;
+                }
 
-        if (invite_msg.substr(0, 6) == "INVITE") {
-            size_t pos1 = invite_msg.find(':', 7);
-            std::string peer_pk_hex = invite_msg.substr(7, pos1 - 7);
-            std::string peer_id = invite_msg.substr(pos1 + 1);
+                std::istream is(buffer_ptr.get());
+                std::string invite_msg;
+                std::getline(is, invite_msg);
 
-            int pending_id = store_pending_socket(std::move(socket));
+                wxLogMessage("[SERVER] Received: %s", invite_msg);
 
-            wxCommandEvent event(wxEVT_INVITATION_RECEIVED);
-            event.SetString(wxString::Format("%s;%s;%d", peer_id, peer_pk_hex, pending_id));
-            wxQueueEvent(event_handler_, event.Clone());
-        }
+                if (invite_msg.substr(0, 6) == "INVITE") {
+                    size_t pos1 = invite_msg.find(':', 7);
+                    size_t pos2 = invite_msg.find(':', pos1 + 1);
+                    
+                    std::string peer_pk_hex = invite_msg.substr(7, pos1 - 7);
+                    std::string peer_id = invite_msg.substr(pos1 + 1, pos2 - pos1 - 1);
+                    std::string mode_str = invite_msg.substr(pos2 + 1);
+                    
+                    EncryptionMode mode = static_cast<EncryptionMode>(std::stoi(mode_str));
+
+                    int pending_id = store_pending_socket(std::move(*socket_ptr));
+
+                    wxCommandEvent event(wxEVT_INVITATION_RECEIVED);
+                    event.SetString(wxString::Format("%s;%s;%d;%d", 
+                        peer_id, peer_pk_hex, pending_id, static_cast<int>(mode)));
+                    wxQueueEvent(event_handler_, event.Clone());
+                    
+                    wxLogMessage("[SERVER] Invitation queued for user approval");
+                }
+            });
     } catch (const std::exception& e) {
-        wxLogError("Error handling connection: %s", e.what());
+        wxLogError("[SERVER] Error handling connection: %s", e.what());
     }
 }
 
