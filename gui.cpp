@@ -127,8 +127,7 @@ MyFrame::MyFrame(const wxString& title)
     top_sizer->Add(info_sizer, 1, wxEXPAND);
 
     settings_button_ = new wxButton(top_bar, ID_Settings, "Settings");
-    top_sizer->Add(settings_button_, 0, wxALL, 5 5);
-    top_sizer->Add(info_sizer, 1, wxEXPAND);
+    top_sizer->Add(settings_button_, 0, wxALL, 5);
 
     top_bar->SetSizer(top_sizer);
     main_sizer->Add(top_bar, 0, wxEXPAND | wxALL, 5);
