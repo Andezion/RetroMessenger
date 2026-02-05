@@ -107,7 +107,8 @@ wxBEGIN_EVENT_TABLE(MyFrame, wxFrame)
     EVT_CLOSE(MyFrame::OnClose)
 wxEND_EVENT_TABLE()
 
-MyFrame::MyFrame(const wxString& title),
+MyFrame::MyFrame(const wxString& title)
+    : wxFrame(nullptr, wxID_ANY, title, wxDefaultPosition, wxSize(900, 600)),
       current_encryption_mode_(EncryptionMode::DOUBLE_RATCHET) {
 
     current_user_id_ = generateUniqueID();
