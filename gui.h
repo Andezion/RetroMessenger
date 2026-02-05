@@ -72,19 +72,20 @@ private:
     wxButton* send_button_;
     wxButton* new_chat_button_;
     wxButton* end_chat_button_;
+    wxButton* settings_button_;
 
     std::string current_user_id_;
-    std::map<std::string, ChatIn
-    EncryptionMode current_encryption_mode_;fo> chats_;
+    std::map<std::string, ChatInfo> chats_;
     std::string active_chat_id_;
+    EncryptionMode current_encryption_mode_;
 
     unsigned char my_pk_[crypto_box_PUBLICKEYBYTES];
     unsigned char my_sk_[crypto_box_SECRETKEYBYTES];
 
     std::unique_ptr<P2PManager> p2p_manager_;
-ttings(wxCommandEvent& event);
-    void OnSe
+
     void OnNewChat(wxCommandEvent& event);
+    void OnSettings(wxCommandEvent& event);
     void OnSend(wxCommandEvent& event);
     void OnEndChat(wxCommandEvent& event);
     void OnChatSelected(wxCommandEvent& event);
@@ -104,10 +105,10 @@ ttings(wxCommandEvent& event);
     wxDECLARE_EVENT_TABLE();
 };
 
-enum {Settings,
-    ID_
+enum {
     ID_Send = wxID_HIGHEST + 1,
     ID_NewChat,
+    ID_Settings,
     ID_EndChat,
     ID_ChatList
 };
