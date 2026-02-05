@@ -61,7 +61,6 @@ class MyFrame : public wxFrame {
 public:
     MyFrame(const wxString& title);
     ~MyFrame();
-    wxButton* settings_button_;
 
 private:
     wxStaticText* user_id_label_;
