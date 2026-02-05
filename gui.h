@@ -9,6 +9,11 @@
 #include "crypto_utils.h"
 #include "protocol.h"
 
+enum class EncryptionMode {
+    SIMPLE_P2P,      
+    DOUBLE_RATCHET  
+};
+
 struct ChatInfo {
     std::string chatID;
     std::string peerID;
@@ -17,6 +22,17 @@ struct ChatInfo {
     RatchetState ratchet;
     bool active;
     bool is_initiator;
+    EncryptionMode encryption_mode;
+};
+
+class SettingsDialog : public wxDialog {
+public:
+    SettingsDialog(wxWindow* parent, EncryptionMode current_mode);
+    
+    EncryptionMode get_encryption_mode() const;
+
+private:
+    wxChoice* encryption_choice_;
 };
 
 class NewChatDialog : public wxDialog {
@@ -45,6 +61,7 @@ class MyFrame : public wxFrame {
 public:
     MyFrame(const wxString& title);
     ~MyFrame();
+    wxButton* settings_button_;
 
 private:
     wxStaticText* user_id_label_;
@@ -57,14 +74,16 @@ private:
     wxButton* end_chat_button_;
 
     std::string current_user_id_;
-    std::map<std::string, ChatInfo> chats_;
+    std::map<std::string, ChatIn
+    EncryptionMode current_encryption_mode_;fo> chats_;
     std::string active_chat_id_;
 
     unsigned char my_pk_[crypto_box_PUBLICKEYBYTES];
     unsigned char my_sk_[crypto_box_SECRETKEYBYTES];
 
     std::unique_ptr<P2PManager> p2p_manager_;
-
+ttings(wxCommandEvent& event);
+    void OnSe
     void OnNewChat(wxCommandEvent& event);
     void OnSend(wxCommandEvent& event);
     void OnEndChat(wxCommandEvent& event);
@@ -85,7 +104,8 @@ private:
     wxDECLARE_EVENT_TABLE();
 };
 
-enum {
+enum {Settings,
+    ID_
     ID_Send = wxID_HIGHEST + 1,
     ID_NewChat,
     ID_EndChat,
