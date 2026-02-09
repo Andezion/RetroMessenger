@@ -205,6 +205,16 @@ void MyFrame::OnNewChat(wxCommandEvent& event) {
         std::string peer_port = dialog.get_port();
 
         if (!peer_address.empty() && !peer_port.empty()) {
+            int my_port = p2p_manager_->get_listening_port();
+            int target_port = std::stoi(peer_port);
+            
+            if (target_port == my_port && 
+                (peer_address == "127.0.0.1" || peer_address == "localhost")) {
+                wxMessageBox("Cannot start a chat with yourself!", 
+                            "Error", wxOK | wxICON_ERROR);
+                return;
+            }
+            
             wxLogMessage("Attempting to connect to %s:%s...", peer_address, peer_port);
             p2p_manager_->send_invitation(peer_address, peer_port, current_user_id_, current_encryption_mode_);
         }
@@ -364,12 +374,7 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
             try {
                 auto socket = p2p_manager_->take_pending_socket(pending_socket_id);
 
-                std::string pk_hex = bytes_to_hex(my_pk_, crypto_box_PUBLICKEYBYTES);
-                std::string accept_msg = "ACCEPT:" + pk_hex + ":" + current_user_id_ + ":" + std::to_string(static_cast<int>(mode)) + "\n";
-                boost::asio::write(socket, boost::asio::buffer(accept_msg));
-
                 std::string chat_id = generateUniqueID();
-                auto session = std::make_shared<P2PSession>(std::move(socket), this, chat_id);
 
                 ChatInfo info;
                 info.chatID = chat_id;
@@ -398,13 +403,19 @@ void MyFrame::OnInvitationReceived(wxCommandEvent& event) {
 
                 chats_[chat_id] = info;
 
-                p2p_manager_->add_session(chat_id, session);
-                session->start();
+                // Send ACCEPT response before regenerating keys
+                std::string pk_hex = bytes_to_hex(my_pk_, crypto_box_PUBLICKEYBYTES);
+                std::string accept_msg = "ACCEPT:" + pk_hex + ":" + current_user_id_ + ":" + std::to_string(static_cast<int>(mode)) + "\n";
+                boost::asio::write(socket, boost::asio::buffer(accept_msg));
 
                 RegenerateUserID();
                 if (mode == EncryptionMode::DOUBLE_RATCHET) {
                     RegenerateKeypair();
                 }
+
+                auto session = std::make_shared<P2PSession>(std::move(socket), this, chat_id);
+                p2p_manager_->add_session(chat_id, session);
+                session->start();
 
                 RefreshChatList();
                 wxLogMessage("Chat started with %s", truncateID(peer_id));
